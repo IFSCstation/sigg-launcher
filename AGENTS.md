@@ -6,6 +6,7 @@ Guidance for agents and humans working on `sigg_launcher`, a Flutter (Linux/GTK)
 - `flutter analyze` — MUST run after any code change; the repo must stay clean.
 - `flutter build linux --debug` — produces `build/linux/x64/debug/bundle/sigg_launcher`. Run after changing Dart or anything under `linux/` (native changes require a full rebuild to take effect).
 - To run: `flutter run -d linux` or launch the built bundle directly.
+- **ARM64 (Raspberry Pi 4) build**: manual GitHub Action `.github/workflows/build-linux-arm64.yml` → `workflow_dispatch` on `ubuntu-24.04-arm`. It clones a pinned Flutter SDK tag (default `3.47.4`, Dart 3.13 — the min that satisfies `sdk: ^3.13.0`; don't trust `subosito/flutter-action` for stable+arm64, see its issue #345), then `flutter build linux --release` (output `build/linux/arm64/release/bundle`), `strip`s the binary, and uploads a `sigg_launcher-linux-arm64.tar.gz` artifact. Runs as a native **Wayland** client on RPi OS Bookworm+ (labwc default); flutter-pi is NOT used (DRM/KMS only, conflicts with a Wayland compositor). On a private repo the arm64 hosted runners bill minutes; switch the label to `[self-hosted, linux, arm64]` if that matters.
 - Hot reload does **NOT** load new native plugins or the custom GTK method channel — after plugin/native changes, fully stop and relaunch (see Quirks).
 
 ## Architecture

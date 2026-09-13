@@ -1,0 +1,58 @@
+name: Build Linux arm64
+
+concurrency:
+  group: build-linux-arm64
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+    inputs:
+      flutter-version:
+        description: Flutter SDK tag to build with (stable; linux-arm64 engine artifacts are published for 3.47.x)
+        required: false
+        default: '3.47.4'
+
+jobs:
+  build:
+    name: Build sigg_launcher for linux-arm64
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            clang cmake ninja-build pkg-config \
+            libgtk-3-dev liblzma-dev libstdc++-12-dev lld \
+            git curl xz-utils
+
+      - name: Install Flutter SDK (pinned)
+        run: |
+          git clone --depth 1 --branch "${{ inputs.flutter-version }}" \
+            https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+          flutter config --enable-linux-desktop
+          flutter --version
+
+      - name: Fetch dependencies
+        run: flutter pub get
+
+      - name: Build (release, native arm64)
+        run: flutter build linux --release
+
+      - name: Strip binary and package bundle
+        run: |
+          cd build/linux/arm64/release
+          strip --strip-all bundle/sigg_launcher
+          tar -czf sigg_launcher-linux-arm64.tar.gz bundle
+          sha256sum sigg_launcher-linux-arm64.tar.gz > sigg_launcher-linux-arm64.tar.gz.sha256
+          du -h sigg_launcher-linux-arm64.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sigg_launcher-linux-arm64
+          path: build/linux/arm64/release/sigg_launcher-linux-arm64.tar.gz
+          if-no-files-found: error
