@@ -52,7 +52,8 @@ class _LibraryState extends State<Library> {
   @override
   void initState() {
     super.initState();
-    _games = (widget.games ?? const GameLoader(gamesFolder: kGamesFolder).load())
+    _games = (widget.games ??
+            GameLoader(gamesFolder: kGamesFolder).load())
         .then((list) {
       _gamesList = list;
       WidgetsBinding.instance.addPostFrameCallback((_) {

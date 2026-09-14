@@ -7,14 +7,19 @@ class GameEntry {
     this.genre,
     this.icon,
     this.color, {
+    this.id,
     this.description,
     this.imageUrl,
     this.imageAsset,
     this.heroPath,
     this.coverPath,
+    this.iconPath,
     this.bgmPath,
     this.executable,
   });
+
+  /// Registry game id (slug), e.g. "half-life".
+  final String? id;
 
   final String title;
   final String tagline;
@@ -36,6 +41,9 @@ class GameEntry {
 
   /// Path to a local cover.png for the game cover.
   final String? coverPath;
+
+  /// Path to a local square icon.png (~512×512) for Discord RPC / trophy lists.
+  final String? iconPath;
 
   /// Path to a selection BGM track (XMB-style jingle), e.g. bgm.ogg.
   final String? bgmPath;

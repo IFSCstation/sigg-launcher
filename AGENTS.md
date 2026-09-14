@@ -18,14 +18,32 @@ Guidance for agents and humans working on `sigg_launcher`, a Flutter (Linux/GTK)
 - `lib/screens/home/home.dart` — `Library` screen. No vertical scroll; single fixed 1280x720 viewport (GTK header bar shrinks the Flutter viewheight, so layout uses `LayoutBuilder`). Owns `_selected` game, nav wiring, BGM trigger.
 - Widgets (`lib/screens/home/widgets/`): `header.dart`, `hero_banner.dart`, `games_row.dart` (+ `GameCover`, "Ver todos" card), `user_switcher.dart`, `user_widget.dart`, `clock.dart`, mock data (`mock_games.dart`, `mock_users.dart`).
 - Sub-pages: `lib/screens/home/pages/` (store, trophies, settings, achievements).
-- Services (`lib/services/`): `game_loader.dart`, `bgm_player.dart`, `game_launcher.dart`, `nav_controller.dart`, `gamepad_nav.dart`, `avatar_loader.dart`, `window_service.dart`, `perf_logger.dart`, `fps_counter.dart`.
+- Services (`lib/services/`): `game_loader.dart`, `achievement_service.dart`, `bgm_player.dart`, `game_launcher.dart`, `nav_controller.dart`, `gamepad_nav.dart`, `avatar_loader.dart`, `window_service.dart`, `perf_logger.dart`, `fps_counter.dart`.
 
 ## Content model (runtime, not assets)
-- Games live in folders under `games/<Title>/`; each must contain a `hero.*` image (aspect ~1900×620) and a `cover.*` image (aspect 600×900). Override the root via `--dart-define=GAMES_FOLDER=...`.
-- Supported image extensions: animated `gif`/`webp` preferred, then `png`/`jpg`/`jpeg`. Audio for BGM: `ogg`/`mp3`/`wav`/`m4a`.
-- `game.json` keys: `name`, `tagline`, `description`, `genre`, `bgm` (sound filename override), `executable` (shell command/path to launch).
-- If a game folder lacks hero+cover it is silently skipped; if no games load at all the UI falls back to `mockGames` and `defaultMockUsers` (in-code mock data).
+- Games live in the centralized registry `~/games/<GameID>/` (`$HOME/games`), the same registry `achievementd` reads. Override the root via `--dart-define=GAMES_FOLDER=...`. `<GameID>` must match the slug rules `[a-z0-9-]+`.
+- Typed subfolder layout per game:
+  ```
+  ~/games/<GameID>/
+  ├── metadata/
+  │   ├── game.json          # name, tagline, description, genre, executable
+  │   └── achievements.toml  # trophy definitions (read by achievementd)
+  ├── images/
+  │   ├── hero.*             # required, ~1900×620 (gif/webp animated preferred)
+  │   ├── cover.*            # required, 600×900
+  │   └── icon.*             # required, square ~512×512 (Discord RPC + trophies tab)
+  ├── media/
+  │   └── bgm.*              # optional: ogg/mp3/wav/m4a
+  └── bin/                   # optional self-contained executables
+  ```
+- `GameLoader` skips folders with a non-slug id or missing hero+cover; if no games load at all the UI falls back to `mockGames` and `defaultMockUsers` (in-code mock data).
 - `avatars/` folder: user profile images (`png`/`webp`/`jpg`/`jpeg`/`gif`), overridable via `--dart-define=AVATARS_FOLDER=...`. Avatars are assigned randomly to mock users at startup; fall back to colored icons if the folder is empty.
+- `~/games/<GameID>/*` image/content mirrors the `.siggpkg` payload spec in `station-achievementd/docs/package-spec.md`. The launcher does NOT ship its own `games/` folder — the registry at `~/games` is the single source of game assets.
+
+## Trophies & achievementd
+- `AchievementsPage`/`GameTrophiesPage` (lib/screens/home/pages/) fetch real trophy state from the `achievementd` daemon (not mocks). `lib/services/achievement_service.dart` speaks the daemon's JSON-lines IPC: `{"v":1,"method":"snapshot","params":{"game":<GameID>,"username":<nickname>}}` over the unix socket at `$XDG_RUNTIME_DIR/achievementd/achievementd.sock`.
+- `username` is the current SIGG profile identity (`AppController.currentUser`; nickname placeholder until a real user-management system lands). Each profile keeps its own unlock state in the daemon store.
+- If the daemon socket is unreachable the page shows an "Serviço de troféus indisponível" state with a retry button; games the daemon doesn't know (no `achievements.toml`) are omitted.
 
 ## Navigation (D-pad)
 - Input is abstracted: `NavController` (ChangeNotifier singleton) holds focus state; the keyboard listener in `home.dart` (global `HardwareKeyboard.instance.addHandler`) maps arrows + Enter/Space onto it. The gamepad input source maps onto the same methods (`lib/services/gamepad_nav.dart`).

@@ -7,6 +7,9 @@
 .buildlog/
 .history
 
+# Game assets live in the central registry (~/games), not in this repo
+games/
+
 
 
 # Flutter repo-specific

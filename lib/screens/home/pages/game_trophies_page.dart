@@ -1,15 +1,47 @@
 import 'package:flutter/material.dart';
-import 'package:sigg_launcher/screens/home/pages/mock_trophies.dart';
+import 'dart:io';
+import 'package:sigg_launcher/screens/home/widgets/mock_games.dart';
+import 'package:sigg_launcher/services/achievement_service.dart';
 
-class GameTrophiesPage extends StatelessWidget {
-  const new({super.key, required this.game});
+const Color _gold = Color(0xFFF6C453);
+
+class _TrophyHeaderIcon extends StatelessWidget {
+  const _TrophyHeaderIcon({required this.game});
 
   final GameEntry game;
 
   @override
   Widget build(BuildContext context) {
+    final iconPath = game.iconPath;
+    if (iconPath != null) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: Image.file(
+          File(iconPath),
+          width: 64,
+          height: 64,
+          fit: BoxFit.cover,
+          errorBuilder: (_, _, _) =>
+              const Icon(Icons.emoji_events, size: 64, color: _gold),
+        ),
+      );
+    }
+    return const Icon(Icons.emoji_events, size: 64, color: _gold);
+  }
+}
+
+class GameTrophiesPage extends StatelessWidget {
+  const GameTrophiesPage({super.key, required this.game, required this.snapshot});
+
+  final GameEntry game;
+  final GameSnapshot snapshot;
+
+  @override
+  Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final progress = game.trophies.isEmpty ? 0.0 : game.earnedCount / game.trophies.length;
+    final trophies = snapshot.trophies;
+    final progress =
+        snapshot.totalCount == 0 ? 0.0 : snapshot.earnedCount / snapshot.totalCount;
 
     return Scaffold(
       appBar: AppBar(title: Text(game.title)),
@@ -22,12 +54,12 @@ class GameTrophiesPage extends StatelessWidget {
               gradient: LinearGradient(
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
-                colors: [game.color, Color.lerp(game.color, Colors.black, 0.55)!],
+                colors: [const Color(0xFF1B5E20), const Color(0xFF0D3B0F)],
               ),
             ),
             child: Row(
               children: [
-                Icon(game.icon, size: 64, color: Colors.white),
+                _TrophyHeaderIcon(game: game),
                 const SizedBox(width: 16),
                 Expanded(
                   child: Column(
@@ -35,11 +67,14 @@ class GameTrophiesPage extends StatelessWidget {
                     children: [
                       Text(
                         game.title,
-                        style: Theme.of(context).textTheme.titleLarge?.copyWith(color: Colors.white),
+                        style: Theme.of(context)
+                            .textTheme
+                            .titleLarge
+                            ?.copyWith(color: Colors.white),
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        '${game.earnedCount}/${game.trophies.length} trophies earned',
+                        '${snapshot.earnedCount}/${snapshot.totalCount} troféus',
                         style: TextStyle(color: Colors.white.withValues(alpha: 0.85)),
                       ),
                       const SizedBox(height: 8),
@@ -56,18 +91,20 @@ class GameTrophiesPage extends StatelessWidget {
           Expanded(
             child: ListView.separated(
               padding: const EdgeInsets.all(16),
-              itemCount: game.trophies.length,
+              itemCount: trophies.length,
               separatorBuilder: (_, _) => const Divider(),
               itemBuilder: (context, index) {
-                final trophy = game.trophies[index];
-                final isEarned = trophy.isEarned;
+                final trophy = trophies[index];
+                final isEarned = trophy.earned;
                 return ListTile(
                   leading: CircleAvatar(
                     backgroundColor: isEarned
-                        ? trophy.color.withValues(alpha: 0.25)
+                        ? _gold.withValues(alpha: 0.25)
                         : colorScheme.surfaceContainerHighest,
-                    foregroundColor: isEarned ? trophy.color : colorScheme.outline,
-                    child: Icon(trophy.icon),
+                    foregroundColor: isEarned ? _gold : colorScheme.outline,
+                    child: Icon(
+                      isEarned ? Icons.emoji_events : Icons.lock_outline,
+                    ),
                   ),
                   title: Text(
                     trophy.title,
@@ -77,11 +114,20 @@ class GameTrophiesPage extends StatelessWidget {
                     ),
                   ),
                   subtitle: Text(
-                    trophy.description,
+                    _subtitle(trophy),
                     style: TextStyle(
                       color: isEarned ? colorScheme.onSurfaceVariant : colorScheme.outline,
                     ),
                   ),
+                  trailing: trophy.points > 0
+                      ? Text(
+                          '${trophy.points} pts',
+                          style: TextStyle(
+                            color: colorScheme.onSurfaceVariant,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        )
+                      : null,
                 );
               },
             ),
@@ -89,5 +135,17 @@ class GameTrophiesPage extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  String _subtitle(Trophy trophy) {
+    final needsEvents = trophy.needsEvents;
+    if (!trophy.earned && needsEvents.isNotEmpty) {
+      final parts = needsEvents.map((req) {
+        final current = trophy.counters[req.event] ?? 0;
+        return '$current / ${req.needed} ${req.event}';
+      });
+      return '${trophy.description}\n${parts.join(' · ')}';
+    }
+    return trophy.description;
   }
 }

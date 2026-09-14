@@ -4,10 +4,12 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:sigg_launcher/screens/home/widgets/mock_games.dart';
 
-const String kGamesFolder = String.fromEnvironment(
-  'GAMES_FOLDER',
-  defaultValue: 'games',
-);
+String get kGamesFolder {
+  const override = String.fromEnvironment('GAMES_FOLDER');
+  if (override.isNotEmpty) return override;
+  final home = Platform.environment['HOME'];
+  return home == null ? 'games' : '$home/games';
+}
 
 const _loadPalette = <Color>[
   Color(0xFF7C4DFF),
@@ -36,12 +38,16 @@ class GameLoader {
     final games = <GameEntry>[];
     await for (final entity in root.list(followLinks: false)) {
       if (entity is! Directory) continue;
-      final heroPath = _findImage(entity.path, 'hero');
-      final coverPath = _findImage(entity.path, 'cover');
+      final id = entity.path.split(Platform.pathSeparator).last;
+      if (!_isSlug(id)) continue;
+
+      final imagesDir = '${entity.path}/images';
+      final heroPath = _findImage(imagesDir, 'hero');
+      final coverPath = _findImage(imagesDir, 'cover');
+      final iconPath = _findImage(imagesDir, 'icon');
       if (heroPath == null || coverPath == null) continue;
 
-      final folderName = entity.path.split(Platform.pathSeparator).last;
-      games.add(_buildEntry(folderName, heroPath, coverPath));
+      games.add(_buildEntry(entity.path, id, heroPath, coverPath, iconPath));
     }
 
     games.sort(
@@ -49,6 +55,11 @@ class GameLoader {
     );
     return games.isEmpty ? List.of(fallback) : games;
   }
+
+  bool _isSlug(String value) =>
+      value.isNotEmpty &&
+      value.codeUnits.every((u) =>
+          (u >= 0x61 && u <= 0x7a) || (u >= 0x30 && u <= 0x39) || u == 0x2d);
 
   String? _findImage(String folderPath, String name) {
     for (final ext in [..._animatedExtensions, ..._staticExtensions]) {
@@ -68,35 +79,27 @@ class GameLoader {
 
   String _abs(String path) => File(path).absolute.path;
 
-  GameEntry _buildEntry(String folderName, String heroPath, String coverPath) {
-    final folder = Directory(File(heroPath).parent.path);
-    final info = _readGameJson('${folder.path}/game.json');
+  GameEntry _buildEntry(
+    String folderPath, String id, String heroPath, String coverPath, String? iconPath) {
+    final info = _readGameJson('$folderPath/metadata/game.json');
 
-    final bgmPath = info['bgm'] != null
-        ? (_resolveBgm(folder.path, info['bgm']) ??
-            _findFile(folder.path, 'bgm', _soundExtensions))
-        : _findFile(folder.path, 'bgm', _soundExtensions);
+    final mediaDir = '$folderPath/media';
+    final bgmPath = _findFile(mediaDir, 'bgm', _soundExtensions);
 
     return GameEntry(
-      info['name'] ?? folderName,
+      info['name'] ?? id,
       info['tagline'] ?? info['description'] ?? 'Pronto para jogar.',
       info['genre'] ?? 'Jogo',
       Icons.sports_esports,
-      _colorFor(folderName),
+      _colorFor(id),
+      id: id,
       description: info['description'],
       heroPath: heroPath,
       coverPath: coverPath,
+      iconPath: iconPath,
       bgmPath: bgmPath,
       executable: info['executable'],
     );
-  }
-
-  String? _resolveBgm(String folderPath, String? customName) {
-    if (customName != null) {
-      final path = '$folderPath/$customName';
-      if (File(path).existsSync()) return _abs(path);
-    }
-    return null;
   }
 
   Map<String, String?> _readGameJson(String path) {

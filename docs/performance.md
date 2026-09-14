@@ -6,7 +6,7 @@ targets are missed: migrate to Qt Quick/QML (documented below).
 
 Target hardware: Pi 4 4GB, Wayland (labwc), ARM64, V3D GPU (no Impeller —
 Skia/GLES only). Real content is animated `gif`/`webp` at full res
-(hero ~1900×620, cover 600×900) loaded from `games/`.
+(hero ~1900×620, cover 600×900) loaded from `~/games`.
 
 ## Hotspots (identified in code)
 

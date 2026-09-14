@@ -68,7 +68,7 @@ void main() {
   Future<Future<List<GameEntry>>> resolveGames(WidgetTester tester) async {
     final completer = Completer<List<GameEntry>>();
     await tester.runAsync(() async {
-      final games = await const GameLoader(gamesFolder: kGamesFolder).load();
+      final games = await GameLoader(gamesFolder: kGamesFolder).load();
       completer.complete(games);
     });
     return completer.future;
