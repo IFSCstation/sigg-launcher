@@ -11,6 +11,10 @@ on:
         description: Flutter SDK tag to build with (stable; linux-arm64 engine artifacts are published for 3.47.x)
         required: false
         default: '3.47.4'
+      launcher-args:
+        description: Runtime args baked into run.sh (e.g. "--fullscreen --fps-overlay"); empty means none
+        required: false
+        default: ''
 
 jobs:
   build:
@@ -50,7 +54,10 @@ jobs:
         run: |
           cd build/linux/arm64/release
           strip --strip-all bundle/sigg_launcher
-          tar -czf sigg_launcher-linux-arm64.tar.gz bundle
+          printf '#!/bin/sh\nhere=$(dirname "$0")\nexec "$here/bundle/sigg_launcher" %s "$@"\n' \
+            "${{ inputs.launcher-args }}" > run.sh
+          chmod +x run.sh
+          tar -czf sigg_launcher-linux-arm64.tar.gz bundle run.sh
           sha256sum sigg_launcher-linux-arm64.tar.gz > sigg_launcher-linux-arm64.tar.gz.sha256
           du -h sigg_launcher-linux-arm64.tar.gz
 
