@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -156,7 +157,15 @@ class _LibraryState extends State<Library> {
 
   void _selectGame(GameEntry game) {
     if (identical(game, _selected)) return;
+    final previous = _selected;
     setState(() => _selected = game);
+    final prevHero = previous?.heroPath;
+    if (prevHero != null && prevHero != game.heroPath) {
+      Future.delayed(const Duration(milliseconds: 400), () {
+        if (!mounted) return;
+        PaintingBinding.instance.imageCache.evict(FileImage(File(prevHero)));
+      });
+    }
     final bgm = game.bgmPath;
     if (bgm != null) {
       BgmPlayer.instance.play(bgm);
