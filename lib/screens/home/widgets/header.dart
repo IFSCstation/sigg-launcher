@@ -164,7 +164,8 @@ class _HeaderState extends State<Header> with WidgetsBindingObserver {
     return AnimatedOpacity(
       opacity: widget.active ? 1.0 : 0.45,
       duration: const Duration(milliseconds: 200),
-      child: Padding(
+      child: RepaintBoundary(
+        child: Padding(
         padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
         child: Stack(
           key: _stackKey,
@@ -214,6 +215,7 @@ class _HeaderState extends State<Header> with WidgetsBindingObserver {
             ),
             _buildIndicator(),
           ],
+        ),
         ),
       ),
     );

@@ -16,6 +16,7 @@ import 'package:sigg_launcher/services/bgm_player.dart';
 import 'package:sigg_launcher/services/game_launcher.dart';
 import 'package:sigg_launcher/services/game_loader.dart';
 import 'package:sigg_launcher/services/gamepad_nav.dart';
+import 'package:sigg_launcher/services/image_cache.dart';
 import 'package:sigg_launcher/services/nav_controller.dart';
 
 const double _gamesSectionMinHeight = 240;
@@ -40,7 +41,12 @@ class _LibraryState extends State<Library> {
   late final Future<List<GameEntry>> _games;
   late final GamepadNavBridge _gamepadBridge;
   List<GameEntry> _gamesList = const [];
-  GameEntry? _selected;
+  final ValueNotifier<GameEntry?> _selected = ValueNotifier<GameEntry?>(null);
+  final ValueNotifier<bool> _gamesActive = ValueNotifier<bool>(true);
+  final ValueNotifier<int> _gamesIndex = ValueNotifier<int>(0);
+  final ValueNotifier<bool> _headerActive = ValueNotifier<bool>(false);
+  final ValueNotifier<int> _headerIndex = ValueNotifier<int>(0);
+  Size _heroSize = Size.zero;
   final ScrollController _gamesScroll = ScrollController();
 
   @override
@@ -52,6 +58,7 @@ class _LibraryState extends State<Library> {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
           NavController.instance.setGamesCount(list.length);
+          if (list.isNotEmpty) _preloadAdjacent(list.first);
         }
       });
       return list;
@@ -64,6 +71,8 @@ class _LibraryState extends State<Library> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) NavController.instance.setGamesCount(_gamesList.length);
     });
+    _headerActive.value = NavController.instance.isHeaderActive;
+    _headerIndex.value = NavController.instance.headerIndex;
   }
 
   @override
@@ -75,6 +84,11 @@ class _LibraryState extends State<Library> {
     }
     _gamepadBridge.dispose();
     GamepadStatus.instance.stop();
+    _selected.dispose();
+    _gamesActive.dispose();
+    _gamesIndex.dispose();
+    _headerActive.dispose();
+    _headerIndex.dispose();
     _gamesScroll.dispose();
     super.dispose();
   }
@@ -112,7 +126,10 @@ class _LibraryState extends State<Library> {
 
   void _onNavChanged() {
     if (!mounted) return;
-    setState(() {});
+    _gamesActive.value = NavController.instance.isGamesActive;
+    _gamesIndex.value = NavController.instance.gamesIndex;
+    _headerActive.value = NavController.instance.isHeaderActive;
+    _headerIndex.value = NavController.instance.headerIndex;
     if (NavController.instance.isGamesActive) {
       final games = _snapshotData();
       final index = NavController.instance.gamesIndex;
@@ -127,7 +144,7 @@ class _LibraryState extends State<Library> {
     if (NavController.instance.isHeaderActive) {
       _activateHeader(NavController.instance.headerIndex);
     } else {
-      _activateGame(_selected);
+      _activateGame(_selected.value);
     }
   }
 
@@ -156,11 +173,14 @@ class _LibraryState extends State<Library> {
   List<GameEntry> _snapshotData() => _gamesList;
 
   void _selectGame(GameEntry game) {
-    if (identical(game, _selected)) return;
-    final previous = _selected;
-    setState(() => _selected = game);
+    if (identical(_selected.value, game)) return;
+    final previous = _selected.value;
+    _selected.value = game;
+    _preloadAdjacent(game);
     final prevHero = previous?.heroPath;
-    if (prevHero != null && prevHero != game.heroPath) {
+    if (prevHero != null &&
+        prevHero != game.heroPath &&
+        !_isNeighbor(previous, game)) {
       Future.delayed(const Duration(milliseconds: 400), () {
         if (!mounted) return;
         PaintingBinding.instance.imageCache.evict(FileImage(File(prevHero)));
@@ -174,6 +194,23 @@ class _LibraryState extends State<Library> {
     }
   }
 
+  bool _isNeighbor(GameEntry? previous, GameEntry game) {
+    final games = _gamesList;
+    if (games.isEmpty || previous == null) return false;
+    final prevIndex = games.indexOf(previous);
+    final index = games.indexOf(game);
+    if (prevIndex < 0 || index < 0) return false;
+    return (prevIndex - index).abs() <= 2;
+  }
+
+  void _preloadAdjacent(GameEntry game) {
+    final games = _gamesList;
+    if (games.isEmpty || _heroSize == Size.zero) return;
+    final index = games.indexOf(game);
+    if (index < 0) return;
+    ImagePreloader.preloadHeroes(context, games, index, _heroSize, range: 2);
+  }
+
   void _openPage(Widget page) {
     Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
   }
@@ -183,107 +220,162 @@ class _LibraryState extends State<Library> {
     return Scaffold(
       body: ExcludeFocus(
         child: FutureBuilder<List<GameEntry>>(
-        future: _games,
-        builder: (context, snapshot) {
-          final games = snapshot.data ?? mockGames;
-          if (snapshot.connectionState != ConnectionState.done) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (games.isEmpty) {
-            return const Center(
-              child: Text('Nenhum jogo encontrado na pasta "games".'),
-            );
-          }
+          future: _games,
+          builder: (context, snapshot) {
+            final games = snapshot.data ?? mockGames;
+            if (snapshot.connectionState != ConnectionState.done) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            if (games.isEmpty) {
+              return const Center(
+                child: Text('Nenhum jogo encontrado na pasta "games".'),
+              );
+            }
 
-          final selected = _selected ?? games.first;
-          return LayoutBuilder(
-            builder: (context, constraints) {
-              final ratioHeroHeight =
-                  constraints.maxWidth / heroAspectRatio;
-              final maxHeroHeight =
-                  (constraints.maxHeight - _gamesSectionMinHeight)
-                      .clamp(0.0, double.infinity);
-              final heroHeight = math.min(ratioHeroHeight, maxHeroHeight);
+            return _FadeIn(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final ratioHeroHeight =
+                      constraints.maxWidth / heroAspectRatio;
+                  final maxHeroHeight =
+                      (constraints.maxHeight - _gamesSectionMinHeight)
+                          .clamp(0.0, double.infinity);
+                  final heroHeight = math.min(ratioHeroHeight, maxHeroHeight);
+                  _heroSize = Size(constraints.maxWidth, heroHeight);
 
-              return Column(
-                children: [
-                  SizedBox(
-                    height: heroHeight,
-                    width: double.infinity,
-                    child: Stack(
-                      children: [
-                        Positioned.fill(
-                          child: AnimatedSwitcher(
-                            duration: const Duration(milliseconds: 300),
-                            switchInCurve: Curves.easeOut,
-                            switchOutCurve: Curves.easeInOut,
-                            transitionBuilder: (child, animation) {
-                              return FadeTransition(
-                                opacity: animation,
-                                child: child,
-                              );
-                            },
-                            child: KeyedSubtree(
-                              key: ObjectKey(selected),
-                              child: HeroBanner(game: selected),
-                            ),
-                          ),
-                        ),
-                        Positioned(
-                          top: 0,
-                          left: 0,
-                          right: 0,
-                          child: Header(
-                            active: NavController.instance.isHeaderActive,
-                            focusedIndex:
-                                NavController.instance.headerIndex,
-                            onStoreTap: () {
-                              NavController.instance.focusHeaderItem(1);
-                              _openPage(const StorePage());
-                            },
-                            onTrophiesTap: () {
-                              NavController.instance.focusHeaderItem(2);
-                              _openPage(const AchievementsPage());
-                            },
-                            onSettingsTap: () {
-                              NavController.instance.focusHeaderItem(3);
-                              _openPage(const SettingsPage());
-                            },
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  Expanded(
-                    child: SafeArea(
-                      top: false,
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(20, 8, 20, 20),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                  return Column(
+                    children: [
+                      SizedBox(
+                        height: heroHeight,
+                        width: double.infinity,
+                        child: Stack(
                           children: [
-                            Expanded(
-                              child: GamesRow(
-                                games: games,
-                                selected: selected,
-                                active: NavController.instance.isGamesActive,
-                                focusIndex: NavController.instance.gamesIndex,
-                                scrollController: _gamesScroll,
-                                onGameTap: _selectGame,
+                            Positioned.fill(
+                              child: ListenableBuilder(
+                                listenable: _selected,
+                                builder: (context, _) {
+                                  final selected =
+                                      _selected.value ?? games.first;
+                                  return AnimatedSwitcher(
+                                    duration:
+                                        const Duration(milliseconds: 300),
+                                    switchInCurve: Curves.easeOut,
+                                    switchOutCurve: Curves.easeInOut,
+                                    transitionBuilder: (child, animation) {
+                                      return FadeTransition(
+                                        opacity: animation,
+                                        child: child,
+                                      );
+                                    },
+                                    child: KeyedSubtree(
+                                      key: ObjectKey(selected),
+                                      child: HeroBanner(game: selected),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
+                            Positioned(
+                              top: 0,
+                              left: 0,
+                              right: 0,
+                              child: ListenableBuilder(
+                                listenable: Listenable.merge(
+                                    [_headerActive, _headerIndex]),
+                                builder: (context, _) {
+                                  return Header(
+                                    active: _headerActive.value,
+                                    focusedIndex: _headerIndex.value,
+                                    onStoreTap: () {
+                                      NavController.instance
+                                          .focusHeaderItem(1);
+                                      _openPage(const StorePage());
+                                    },
+                                    onTrophiesTap: () {
+                                      NavController.instance
+                                          .focusHeaderItem(2);
+                                      _openPage(const AchievementsPage());
+                                    },
+                                    onSettingsTap: () {
+                                      NavController.instance
+                                          .focusHeaderItem(3);
+                                      _openPage(const SettingsPage());
+                                    },
+                                  );
+                                },
                               ),
                             ),
                           ],
                         ),
                       ),
-                    ),
-                  ),
-                ],
-              );
-            },
-          );
-        },
-      ),
+                      Expanded(
+                        child: SafeArea(
+                          top: false,
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(20, 8, 20, 20),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                Expanded(
+                                  child: ListenableBuilder(
+                                    listenable: Listenable.merge(
+                                        [_gamesActive, _gamesIndex, _selected]),
+                                    builder: (context, _) {
+                                      return GamesRow(
+                                        games: games,
+                                        selected:
+                                            _selected.value ?? games.first,
+                                        active: _gamesActive.value,
+                                        focusIndex: _gamesIndex.value,
+                                        scrollController: _gamesScroll,
+                                        onGameTap: _selectGame,
+                                      );
+                                    },
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
+            );
+          },
+        ),
       ),
     );
+  }
+}
+
+class _FadeIn extends StatefulWidget {
+  const _FadeIn({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_FadeIn> createState() => _FadeInState();
+}
+
+class _FadeInState extends State<_FadeIn>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 450),
+  )..forward();
+  late final Animation<double> _opacity =
+      CurvedAnimation(parent: _controller, curve: Curves.easeOut);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(opacity: _opacity, child: widget.child);
   }
 }

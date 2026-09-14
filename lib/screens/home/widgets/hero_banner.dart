@@ -72,53 +72,12 @@ class HeroBanner extends StatelessWidget {
                 ),
               ),
               if (art != null) ...[
-                Positioned.fill(child: art),
                 Positioned.fill(
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        stops: const [0, 0.3, 1],
-                        colors: [
-                          Colors.black.withValues(alpha: 0.45),
-                          Colors.black.withValues(alpha: 0.15),
-                          Colors.transparent,
-                        ],
-                      ),
-                    ),
-                  ),
+                  child: RepaintBoundary(child: art),
                 ),
                 Positioned.fill(
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.bottomCenter,
-                        end: Alignment.topCenter,
-                        stops: const [0, 0.35, 1],
-                        colors: [
-                          Colors.black.withValues(alpha: 0.72),
-                          Colors.black.withValues(alpha: 0.28),
-                          Colors.transparent,
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-                Positioned.fill(
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.centerLeft,
-                        end: Alignment.centerRight,
-                        stops: const [0, 0.45, 1],
-                        colors: [
-                          Colors.black.withValues(alpha: 0.6),
-                          Colors.black.withValues(alpha: 0.15),
-                          Colors.black.withValues(alpha: 0.3),
-                        ],
-                      ),
-                    ),
+                  child: RepaintBoundary(
+                    child: CustomPaint(painter: _HeroScrimPainter()),
                   ),
                 ),
               ],
@@ -198,4 +157,50 @@ class HeroBanner extends StatelessWidget {
       ),
     );
   }
+}
+
+class _HeroScrimPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    _paintGradient(canvas, rect, Alignment.topCenter, Alignment.bottomCenter,
+        const [0, 0.3, 1], const [
+      Color(0x73000000),
+      Color(0x26000000),
+      Colors.transparent,
+    ]);
+    _paintGradient(canvas, rect, Alignment.bottomCenter, Alignment.topCenter,
+        const [0, 0.35, 1], const [
+      Color(0xB8000000),
+      Color(0x47000000),
+      Colors.transparent,
+    ]);
+    _paintGradient(canvas, rect, Alignment.centerLeft, Alignment.centerRight,
+        const [0, 0.45, 1], const [
+      Color(0x99000000),
+      Color(0x26000000),
+      Color(0x4D000000),
+    ]);
+  }
+
+  void _paintGradient(
+    Canvas canvas,
+    Rect rect,
+    Alignment begin,
+    Alignment end,
+    List<double> stops,
+    List<Color> colors,
+  ) {
+    final paint = Paint()
+      ..shader = LinearGradient(
+        begin: begin,
+        end: end,
+        stops: stops,
+        colors: colors,
+      ).createShader(rect);
+    canvas.drawRect(rect, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _HeroScrimPainter oldDelegate) => false;
 }

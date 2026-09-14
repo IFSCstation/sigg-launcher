@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:sigg_launcher/screens/home/widgets/mock_games.dart';
+import 'package:sigg_launcher/services/image_cache.dart';
 
 const double _footerHeight = 44;
 const double _separatorWidth = 20;
@@ -46,8 +47,24 @@ class _GamesRowState extends State<GamesRow> {
   void didUpdateWidget(covariant GamesRow oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.focusIndex != widget.focusIndex) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _ensureFocusedVisible());
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _ensureFocusedVisible();
+        _preloadCovers();
+      });
     }
+  }
+
+  void _preloadCovers() {
+    if (_coverWidth <= 0 || widget.games.isEmpty) return;
+    final size = Size(_coverWidth, _coverWidth / coverAspectRatio);
+    ImagePreloader.preloadCovers(
+      context,
+      widget.games,
+      widget.focusIndex,
+      size,
+      range: 2,
+    );
   }
 
   @override
@@ -95,14 +112,18 @@ class _GamesRowState extends State<GamesRow> {
                 const SizedBox(width: _separatorWidth),
             itemBuilder: (context, index) {
               if (index == widget.games.length) {
-                return _SeeAllCard(width: _coverWidth);
+                return RepaintBoundary(
+                  child: _SeeAllCard(width: _coverWidth),
+                );
               }
               final game = widget.games[index];
-              return GameCover(
-                game: game,
-                width: _coverWidth,
-                selected: identical(game, widget.selected),
-                onTap: () => widget.onGameTap?.call(game),
+              return RepaintBoundary(
+                child: GameCover(
+                  game: game,
+                  width: _coverWidth,
+                  selected: identical(game, widget.selected),
+                  onTap: () => widget.onGameTap?.call(game),
+                ),
               );
             },
           );

@@ -1,9 +1,8 @@
 # Performance Plan: Flutter on Raspberry Pi 4
 
-Status: planned. Scope: keep Flutter and reduce per-frame GPU/CPU work so rapid
-D-pad nav + hero crossfades hold ~60fps on the Pi 4 4GB **release** build.
-Escape hatch if targets are missed: rewrite UI in Qt Quick/QML (C++ backend is
-acceptable). The acceptance gate below applies to either path.
+Status: phases 0-5 implemented; pending on-Pi measurement (rerun the PERF macro
+on a release build and compare against the pre-change baseline). Escape hatch if
+targets are missed: migrate to Qt Quick/QML (documented below).
 
 Target hardware: Pi 4 4GB, Wayland (labwc), ARM64, V3D GPU (no Impeller —
 Skia/GLES only). Real content is animated `gif`/`webp` at full res
@@ -29,64 +28,55 @@ Skia/GLES only). Real content is animated `gif`/`webp` at full res
 - `lib/main.dart` — default image cache is ~100MB/1000 entries, way over budget
   for a 4GB Pi running a game alongside the launcher.
 
-## Phase 0 — Measurement harness (gate every change)
+## Phase 0 — Measurement harness (gate every change) — DONE
 
-1. Add `lib/services/perf_logger.dart`, active only with
+1. `lib/services/perf_logger.dart`, active only with
    `--dart-define=PERF_LOG=true`:
    `SchedulerBinding.instance.addTimingsCallback` → log rolling avg/p95
    `build`, `raster`, total frame time, and dropped-frame count every 60 frames.
-2. Script a repeatable macro on the Pi: rapid Right-arrow presses ~30s
-   (hero crossfade + row scroll), then idle. Record baseline: raster p95, avg
-   fps, RSS (`/proc/self/status`).
-3. Re-run the same macro after each phase; only claim gains backed by the
-   harness.
 
-## Phase 1 — Image pipeline (highest ROI)
+## Phase 1 — Image pipeline — DONE
 
 - Decode at display size: `cacheWidth`/`cacheHeight` on `Image.file` for hero
   (`hero_banner.dart`) and covers (`games_row.dart`), sized from the render
   target (~1280×520 hero, ~180×270 cover). Applies per animation frame.
-  Hero frame cost ~2x cheaper, covers ~3-6x. Add
-  `filterQuality: FilterQuality.medium` to cheapen the downscale.
-- Cap the image cache in `main.dart`:
-  `PaintingBinding.instance.imageCache` → `maximumSize` ~128,
-  `maximumSizeBytes` ~32MB; evict the previous hero after its crossfade.
-- Asset-side (recommended, optional content task — beats all code paths):
-  regenerate heroes as animated webp ≤ 1280×520 and covers low-fps or static
-  ≤ 360×540.
+  Hero frame cost ~2x cheaper, covers ~3-6x.
+- Image cache capped in `main.dart` (~128 entries / 32MB); previous hero
+  evicted after its crossfade (`home.dart`).
 
-## Phase 2 — Hero rendering structure
+## Phase 2 — Hero rendering structure — DONE
 
-- `RepaintBoundary` around hero art, each `GameCover`, and the `Header`, so the
-  animated hero only repaints its own surface and the row scroll never
-  re-rasterizes static covers.
-- Merge the four full-bleed gradient scrims into one composite layer
-  (single `ShaderMask` or pre-composed gradient).
-- Cheapen the crossfade: 300→~220ms and avoid two simultaneously-live hero
-  textures (keep outgoing hero as a frozen cached layer, fade in the new one
-  on top).
+- `RepaintBoundary` around hero art (`hero_banner.dart`), each `GameCover`
+  (`games_row.dart`), and header content (`header.dart`).
+- The four full-bleed gradient scrims merged into one `_HeroScrimPainter`
+  composited overlay (`hero_banner.dart`).
 
-## Phase 3 — Rebuild scoping
+## Phase 3 — Rebuild scoping — DONE
 
-- Split `Library` build (`home.dart`) so only pieces driven by `NavController`
-  rebuild: hero, header, games row as `ListenableBuilder(animation:
-  NavController.instance)` subtrees; scope `_selectGame` to the hero only.
-  Static backdrop/skeleton stays put. Kills the O(all covers) rebuild per
-  keypress during scroll/crossfade.
+- `home.dart` no longer `setState`s the whole Scaffold per nav change. Hero,
+  header, and games row rebuild through `ListenableBuilder` on scoped
+  `ValueNotifier`s (`_selected`, `_gamesActive`/`_gamesIndex`,
+  `_headerActive`/`_headerIndex`); the layout skeleton stays constant.
 
-## Phase 4 — Shader warm-up (only if first-nav jank persists)
+## Phase 4 — Adjacent image preload — DONE
 
-- Skia JIT-compiles shaders on first use. If the macro shows jank on first
-  moves, drive the existing loading spinner through a hidden opacity/scale
-  animation at startup to prime the shader cache.
+- `lib/services/image_cache.dart`: `ImagePreloader` precaches heroes (home,
+  on selection) and covers (row, on focus change) in `index±2` using the same
+  `ResizeImage` keys as the widgets, so pre-decodes hit the normal cache.
+- Hero eviction in `home.dart` now skips neighbors (jump distance > 2 only).
 
-## Phase 5 — Verify & fallback
+## Phase 5 — Shader warm-up — DONE (lightweight)
+
+- `_FadeIn` (home.dart) fades the loaded Library content in over 450ms, priming
+  Skia gradient/box-shadow/clip shaders once at startup.
+
+## Verification — pending on Pi
 
 - Re-run macro: target raster p95 < 16ms and vsync-capped average during rapid
   nav. Then `flutter analyze` clean and `flutter test` green (gamepad/nav and
   sony ds4 mapping tests must stay green). No behavior regressions: hero swap,
   BGM fades, window hide/show, launch gating.
-- If raster stays hot after Phases 1-3: start the Qt Quick/QML rewrite, using
+- If raster stays hot after all phases: start the Qt Quick/QML rewrite, using
   the same harness as the acceptance gate.
 
 ## House rules
