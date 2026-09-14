@@ -1,7 +1,9 @@
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:sigg_launcher/screens/home/widgets/mock_games.dart';
+import 'package:sigg_launcher/services/image_cache.dart';
 
 const double _footerHeight = 44;
 const double _separatorWidth = 20;
@@ -45,8 +47,24 @@ class _GamesRowState extends State<GamesRow> {
   void didUpdateWidget(covariant GamesRow oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.focusIndex != widget.focusIndex) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _ensureFocusedVisible());
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _ensureFocusedVisible();
+        _preloadCovers();
+      });
     }
+  }
+
+  void _preloadCovers() {
+    if (_coverWidth <= 0 || widget.games.isEmpty) return;
+    final size = Size(_coverWidth, _coverWidth / coverAspectRatio);
+    ImagePreloader.preloadCovers(
+      context,
+      widget.games,
+      widget.focusIndex,
+      size,
+      range: 2,
+    );
   }
 
   @override
@@ -94,14 +112,18 @@ class _GamesRowState extends State<GamesRow> {
                 const SizedBox(width: _separatorWidth),
             itemBuilder: (context, index) {
               if (index == widget.games.length) {
-                return _SeeAllCard(width: _coverWidth);
+                return RepaintBoundary(
+                  child: _SeeAllCard(width: _coverWidth),
+                );
               }
               final game = widget.games[index];
-              return GameCover(
-                game: game,
-                width: _coverWidth,
-                selected: identical(game, widget.selected),
-                onTap: () => widget.onGameTap?.call(game),
+              return RepaintBoundary(
+                child: GameCover(
+                  game: game,
+                  width: _coverWidth,
+                  selected: identical(game, widget.selected),
+                  onTap: () => widget.onGameTap?.call(game),
+                ),
               );
             },
           );
@@ -135,6 +157,12 @@ class _GameCoverState extends State<GameCover> {
   @override
   Widget build(BuildContext context) {
     final textTheme = Theme.of(context).textTheme;
+    final devicePixelRatio = MediaQuery.devicePixelRatioOf(context);
+    final cacheWidth = math.max(1, (widget.width * devicePixelRatio).round());
+    final cacheHeight = math.max(
+      1,
+      ((widget.width / coverAspectRatio) * devicePixelRatio).round(),
+    );
 
     return MouseRegion(
       onEnter: (_) => setState(() => _hovered = true),
@@ -201,6 +229,9 @@ class _GameCoverState extends State<GameCover> {
                               File(widget.game.coverPath!),
                               fit: BoxFit.cover,
                               gaplessPlayback: true,
+                              cacheWidth: cacheWidth,
+                              cacheHeight: cacheHeight,
+                              filterQuality: FilterQuality.medium,
                               errorBuilder: (context, error, stackTrace) =>
                                   const SizedBox.shrink(),
                             )
@@ -209,12 +240,18 @@ class _GameCoverState extends State<GameCover> {
                               widget.game.imageAsset!,
                               fit: BoxFit.cover,
                               gaplessPlayback: true,
+                              cacheWidth: cacheWidth,
+                              cacheHeight: cacheHeight,
+                              filterQuality: FilterQuality.medium,
                             )
                           else if (widget.game.imageUrl != null)
                             Image.network(
                               widget.game.imageUrl!,
                               fit: BoxFit.cover,
                               gaplessPlayback: true,
+                              cacheWidth: cacheWidth,
+                              cacheHeight: cacheHeight,
+                              filterQuality: FilterQuality.medium,
                               errorBuilder: (context, error, stackTrace) =>
                                   const SizedBox.shrink(),
                             ),
