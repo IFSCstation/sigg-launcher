@@ -70,6 +70,56 @@ Skia/GLES only). Real content is animated `gif`/`webp` at full res
 - `_FadeIn` (home.dart) fades the loaded Library content in over 450ms, priming
   Skia gradient/box-shadow/clip shaders once at startup.
 
+## FPS/raster overlay (dev tool)
+
+- `lib/services/fps_counter.dart`, active only with
+  `--dart-define=FPS_OVERLAY=true`: on-screen box (top-right) with live FPS,
+  avg build/raster ms, p95 raster and dropped frames over the last second.
+  Wired in `app_widget.dart` around the `MaterialApp`. Independent of the
+  `PERF_LOG` console harness; use it to eyeball smoothness during nav macros
+  on the Pi. `build-pi.sh --fps-overlay` adds the define for Pi builds.
+
+## Phase 6 — Display path: fullscreen + direct scan-out (SPIKE)
+
+Status: native hook in place; pending on-Pi measurement.
+
+Reasoning: the GTK/FEL/flutter-pi/Flutter-compositor comparison concluded the
+only per-frame win from flutter-pi is **no compositing pass** (same engine,
+same Skia, same V3D). flutters on labwc keep that pass because wlroots
+composites every client surface — unless **direct scan-out** engages, which it
+does when a surface exactly matches the output geometry and nothing overlays
+it. The launcher never hits that today (1280×720 window + CSD header on an
+1080p output).
+
+Change:
+- `linux/runner/my_application.cc` reads `SIGG_FULLSCREEN` env var; when set,
+  the GTK window starts fullscreen (CSD header auto-hides, so the Flutter view
+  gets the full panel height).
+- On the Pi, pair it with a 720p KMS mode (`config.txt`: `hdmi_group=2`,
+  `hdmi_mode=4`) so the fullscreen surface matches the output 1:1 and wlroots
+  direct-scans it. 1080p fullscreen would also scan out but makes the engine
+  raster 2.25x the pixels, which is worse for the frame budget.
+
+Verify on Pi:
+1. `labwc -d` (log to file) shows `Direct scan-out enabled` (wlr_scene).
+   Toggle `WLR_SCENE_DISABLE_DIRECT_SCANOUT=1` to see the difference.
+2. Cursor: wlroots uses a KMS cursor plane on Pi, so it shouldn't block
+   scan-out; if it does, hide it or set `WLR_NO_HARDWARE_CURSORS`.
+3. PERF macro (release, `PERF_LOG=true`) before/after: framerate can stay
+   equal or rise; raster p95 is engine-side, so it should be unchanged.
+4. Re-show after game exit must still be fullscreen
+   (`gtk_window_present` + saved fullscreen state) — the one behavior risk.
+
+Rejected embedding alternatives (same reason each time: no raster gain +
+broken "launch arbitrary windowed games" requirement):
+- flutter-pi (ardera): DRM master only, no Wayland/X11 → can't coexist with a
+  compositor, and games are Wayland clients.
+- flutter-embedded-linux / sony: locked to Flutter ≤3.29 (project is
+  3.47/Dart 3.13), no window hide/show, plugin ABI rework.
+- Flutter-as-Wayland-compositor (Denial/Zenith): alpha, and compositing every
+  client through Flutter destroys direct scan-out for fullscreen games —
+  strictly worse than labwc.
+
 ## Verification — pending on Pi
 
 - Re-run macro: target raster p95 < 16ms and vsync-capped average during rapid

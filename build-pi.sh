@@ -2,11 +2,13 @@
 set -euo pipefail
 
 PERF_LOG=true
+FPS_OVERLAY=false
 STRIP=false
 
 for arg in "$@"; do
   case "$arg" in
     --no-perf-log) PERF_LOG=false ;;
+    --fps-overlay) FPS_OVERLAY=true ;;
     --strip) STRIP=true ;;
     *)
       echo "Unknown argument: $arg" >&2
@@ -17,10 +19,15 @@ done
 
 define_flag=""
 if [ "$PERF_LOG" = true ]; then
-  define_flag="--dart-define=PERF_LOG=true"
+  define_flag="-dart-define=PERF_LOG=true"
 fi
 
-flutter build linux --release $define_flag
+fps_flag=""
+if [ "$FPS_OVERLAY" = true ]; then
+  fps_flag="-dart-define=FPS_OVERLAY=true"
+fi
+
+flutter build linux --release $define_flag $fps_flag
 
 case "$(uname -m)" in
   aarch64) arch="arm64" ;;

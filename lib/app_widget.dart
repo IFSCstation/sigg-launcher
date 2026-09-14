@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:sigg_launcher/app_controller.dart';
 import 'package:sigg_launcher/screens/home/home.dart';
+import 'package:sigg_launcher/services/fps_counter.dart';
 import 'package:sigg_launcher/services/gamepad_nav.dart';
 
 const Color kScreenBackground = Color(0xFF0E1116);
@@ -27,15 +28,17 @@ class _AppWidgetState extends State<AppWidget> {
     return AnimatedBuilder(
       animation: AppController.instance,
       builder: (context, child) {
-        return MaterialApp(
-          debugShowCheckedModeBanner: false,
-          theme: theme,
-          initialRoute: '/',
-          navigatorObservers: [LauncherRouteObserver.instance],
-          routes: {
-            // POS Screens
-            '/': (context) => Library(),
-          },
+        return FpsCounter(
+          child: MaterialApp(
+            debugShowCheckedModeBanner: false,
+            theme: theme,
+            initialRoute: '/',
+            navigatorObservers: [LauncherRouteObserver.instance],
+            routes: {
+              // POS Screens
+              '/': (context) => Library(),
+            },
+          ),
         );
       },
     );

@@ -90,6 +90,11 @@ static void my_application_activate(GApplication *application)
 
   gtk_window_set_default_size(window, 1280, 720);
 
+  if (g_getenv("SIGG_FULLSCREEN") != nullptr)
+  {
+    gtk_window_fullscreen(window);
+  }
+
   g_autoptr(FlDartProject) project = fl_dart_project_new();
   fl_dart_project_set_enable_impeller(project, FALSE);
   fl_dart_project_set_dart_entrypoint_arguments(
