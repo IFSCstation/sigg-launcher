@@ -77,7 +77,10 @@ Skia/GLES only). Real content is animated `gif`/`webp` at full res
   avg build/raster ms, p95 raster and dropped frames over the last second.
   Wired in `app_widget.dart` around the `MaterialApp`. Independent of the
   `PERF_LOG` console harness; use it to eyeball smoothness during nav macros
-  on the Pi. `build-pi.sh --fps-overlay` adds the define for Pi builds.
+  on the Pi. Since the env check is `Platform.environment`, it is also
+  enabled at runtime by `SIGG_FPS_OVERLAY=1` or `./sigg_launcher
+  --fps-overlay` (no rebuild needed). `build-pi.sh --fps-overlay` adds the
+  define for Pi builds.
 
 ## Phase 6 — Display path: fullscreen + direct scan-out (SPIKE)
 
@@ -92,9 +95,9 @@ it. The launcher never hits that today (1280×720 window + CSD header on an
 1080p output).
 
 Change:
-- `linux/runner/my_application.cc` reads `SIGG_FULLSCREEN` env var; when set,
-  the GTK window starts fullscreen (CSD header auto-hides, so the Flutter view
-  gets the full panel height).
+- `linux/runner/my_application.cc` reads the `--fullscreen` exec flag (or the
+  `SIGG_FULLSCREEN` env var); when set, the GTK window starts fullscreen (CSD
+  header auto-hides, so the Flutter view gets the full panel height).
 - On the Pi, pair it with a 720p KMS mode (`config.txt`: `hdmi_group=2`,
   `hdmi_mode=4`) so the fullscreen surface matches the output 1:1 and wlroots
   direct-scans it. 1080p fullscreen would also scan out but makes the engine

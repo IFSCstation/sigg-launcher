@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:ui' show FramePhase;
 
 import 'package:flutter/material.dart';
@@ -7,7 +8,9 @@ import 'package:flutter/scheduler.dart';
 class FpsCounter extends StatefulWidget {
   const FpsCounter({super.key, required this.child});
 
-  static bool get enabled => const bool.fromEnvironment('FPS_OVERLAY');
+  static bool get enabled =>
+      const bool.fromEnvironment('FPS_OVERLAY') ||
+      Platform.environment['SIGG_FPS_OVERLAY'] == '1';
 
   final Widget child;
 

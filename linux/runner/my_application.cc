@@ -16,6 +16,44 @@ struct _MyApplication
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
 
 static FlMethodChannel *window_channel = nullptr;
+static gboolean fullscreen_requested = FALSE;
+
+static char **filter_launcher_flags(char **argv)
+{
+  for (int i = 1; argv[i] != nullptr; i++)
+  {
+    if (g_strcmp0(argv[i], "--fullscreen") == 0)
+    {
+      fullscreen_requested = TRUE;
+    }
+    else if (g_strcmp0(argv[i], "--fps-overlay") == 0)
+    {
+      g_setenv("SIGG_FPS_OVERLAY", "1", TRUE);
+    }
+  }
+
+  int count = 0;
+  for (int i = 1; argv[i] != nullptr; i++)
+  {
+    if (g_strcmp0(argv[i], "--fullscreen") != 0 &&
+        g_strcmp0(argv[i], "--fps-overlay") != 0)
+    {
+      count++;
+    }
+  }
+
+  char **result = g_new0(char *, count + 1);
+  int j = 0;
+  for (int i = 1; argv[i] != nullptr; i++)
+  {
+    if (g_strcmp0(argv[i], "--fullscreen") != 0 &&
+        g_strcmp0(argv[i], "--fps-overlay") != 0)
+    {
+      result[j++] = g_strdup(argv[i]);
+    }
+  }
+  return result;
+}
 
 // Handles "sigg_launcher/window" method calls (hide/show the launcher window
 // while a game is running).
@@ -90,7 +128,7 @@ static void my_application_activate(GApplication *application)
 
   gtk_window_set_default_size(window, 1280, 720);
 
-  if (g_getenv("SIGG_FULLSCREEN") != nullptr)
+  if (g_getenv("SIGG_FULLSCREEN") != nullptr || fullscreen_requested)
   {
     gtk_window_fullscreen(window);
   }
@@ -134,8 +172,7 @@ static gboolean my_application_local_command_line(GApplication *application,
                                                   int *exit_status)
 {
   MyApplication *self = MY_APPLICATION(application);
-  // Strip out the first argument as it is the binary name.
-  self->dart_entrypoint_arguments = g_strdupv(*arguments + 1);
+  self->dart_entrypoint_arguments = filter_launcher_flags(*arguments);
 
   g_autoptr(GError) error = nullptr;
   if (!g_application_register(application, nullptr, &error))

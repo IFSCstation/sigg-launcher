@@ -24,7 +24,7 @@ Future<bool> anyGameProcessRunning() async {
 }
 
 Future<void> killGameProcesses() async {
-  await Process.run('pkill', ['-f', _gameProcessPattern]);
+  await Process.run('pkill', ['-9', '-f', _gameProcessPattern]);
 }
 
 Future<void> settle(WidgetTester tester, [int rounds = 8]) async {
