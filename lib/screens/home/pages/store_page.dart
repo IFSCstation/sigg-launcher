@@ -8,6 +8,9 @@ class StorePage extends StatelessWidget {
     final colorScheme = Theme.of(context).colorScheme;
 
     return Scaffold(
+      // Body paints under the transparent AppBar so the header reads as a
+      // floating see-through overlay over scrolling content.
+      extendBodyBehindAppBar: true,
       appBar: AppBar(
         title: const Text("IFSCstation Store"),
         // Convention: submenus have no back button (B-back / Escape).
@@ -17,7 +20,12 @@ class StorePage extends StatelessWidget {
         scrolledUnderElevation: 0,
       ),
       body: GridView.builder(
-        padding: const EdgeInsets.all(16),
+        padding: EdgeInsets.only(
+          top: kToolbarHeight + 16,
+          left: 16,
+          right: 16,
+          bottom: 16,
+        ),
         gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
           maxCrossAxisExtent: 200,
           mainAxisExtent: 180,

@@ -23,6 +23,10 @@ class AchievementsPage extends StatefulWidget {
   State<AchievementsPage> createState() => _AchievementsPageState();
 }
 
+/// Height of the trophies submenu header (deliberately taller than a stock
+/// toolbar so the library progress reads as part of the header).
+const double _headerHeight = 96;
+
 class _AchievementsPageState extends State<AchievementsPage> {
   final PageNavController _nav = PageNavController();
   List<_GameTrophyEntry> _entries = const [];
@@ -136,40 +140,46 @@ class _AchievementsPageState extends State<AchievementsPage> {
 
     return Scaffold(
       backgroundColor: kScreenBackground,
+      // Body paints under the transparent AppBar so the header reads as a
+      // floating see-through overlay over scrolling content.
+      extendBodyBehindAppBar: true,
       appBar: AppBar(
-        title: const Text('Troféus'),
+        toolbarHeight: _headerHeight,
+        title: _TrophiesHeader(earned: earnedCount, total: totalCount),
         // Convention: submenus have no back button (B-back / Escape); the
         // header is transparent so the screen's background shows through.
         automaticallyImplyLeading: false,
         backgroundColor: Colors.transparent,
         surfaceTintColor: Colors.transparent,
         scrolledUnderElevation: 0,
-        titleTextStyle: Theme.of(context).textTheme.titleLarge
-            ?.copyWith(fontWeight: FontWeight.w700),
       ),
-      body: _buildBody(earnedCount, totalCount),
+      body: _buildBody(),
     );
   }
 
-  Widget _buildBody(int earnedCount, int totalCount) {
+  Widget _buildBody() {
     if (_loading) return const Center(child: CircularProgressIndicator());
     if (_error) return _Unavailable(onRetry: _load);
     if (_entries.isEmpty) {
       return ListView(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-        children: const [
-          _SummaryBanner(earned: 0, total: 0),
-          SizedBox(height: 40),
-          _EmptyTrophies(),
-        ],
+        padding: EdgeInsets.only(
+          left: 16,
+          top: _headerHeight + 8,
+          right: 16,
+          bottom: 24,
+        ),
+        children: const [_EmptyTrophies()],
       );
     }
 
     return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+      padding: EdgeInsets.only(
+        left: 16,
+        top: _headerHeight + 8,
+        right: 16,
+        bottom: 24,
+      ),
       children: [
-        _SummaryBanner(earned: earnedCount, total: totalCount),
-        const SizedBox(height: 20),
         for (var i = 0; i < _entries.length; i++)
           _GameTrophyCard(
             key: _cardKeys![i],
@@ -182,8 +192,8 @@ class _AchievementsPageState extends State<AchievementsPage> {
   }
 }
 
-class _SummaryBanner extends StatelessWidget {
-  const _SummaryBanner({required this.earned, required this.total});
+class _TrophiesHeader extends StatelessWidget {
+  const _TrophiesHeader({required this.earned, required this.total});
 
   final int earned;
   final int total;
@@ -191,78 +201,76 @@ class _SummaryBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final textTheme = Theme.of(context).textTheme;
-    final colorScheme = Theme.of(context).colorScheme;
     final progress = total == 0 ? 0.0 : earned / total;
 
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(22),
-        color: const Color(0xFF1A1F27),
-        border: Border.all(color: Colors.white10),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Row(
-          children: [
-            Container(
-              width: 56,
-              height: 56,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: kTrophyGold.withValues(alpha: 0.16),
-                border: Border.all(
-                  color: kTrophyGold.withValues(alpha: 0.55),
-                  width: 1.5,
+    return Row(
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(8, 0, 0, 0),
+                child: Text(
+                  'Troféus',
+                  style: textTheme.headlineMedium?.copyWith(
+                    fontSize: 38,
+                    fontWeight: FontWeight.w500,
+                    letterSpacing: 0.2,
+                  ),
                 ),
-                boxShadow: [
-                  BoxShadow(
-                    color: kTrophyGold.withValues(alpha: 0.35),
-                    blurRadius: 18,
-                    spreadRadius: 1,
-                  ),
-                ],
               ),
-              child: const Icon(
-                Icons.emoji_events,
-                size: 30,
-                color: kTrophyGold,
-              ),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    '$earned / $total troféus',
-                    style: textTheme.titleLarge?.copyWith(
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    'Progresso total da biblioteca',
-                    style: textTheme.bodySmall?.copyWith(
-                      color: colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(999),
-                    child: LinearProgressIndicator(
-                      value: progress,
-                      minHeight: 8,
-                      backgroundColor: Colors.white.withValues(alpha: 0.1),
-                      color: kTrophyGold,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
-      ),
+        const SizedBox(width: 32),
+        SizedBox(
+          width: 300,
+          child: Row(
+            children: [
+              const Icon(Icons.emoji_events, size: 40, color: kTrophyGold),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          '$earned / $total troféus',
+                          style: textTheme.titleSmall?.copyWith(
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        Text(
+                          '${(progress * 100).round()}%',
+                          style: textTheme.titleSmall?.copyWith(
+                            fontWeight: FontWeight.w800,
+                            color: kTrophyGold,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(999),
+                      child: LinearProgressIndicator(
+                        value: progress,
+                        minHeight: 7,
+                        backgroundColor: Colors.white.withValues(alpha: 0.1),
+                        color: kTrophyGold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }

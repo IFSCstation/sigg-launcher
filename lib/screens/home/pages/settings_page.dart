@@ -6,6 +6,9 @@ class SettingsPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      // Body paints under the transparent AppBar so the header reads as a
+      // floating see-through overlay over scrolling content.
+      extendBodyBehindAppBar: true,
       appBar: AppBar(
         title: const Text("Settings"),
         // Convention: submenus have no back button (B-back / Escape).
@@ -15,7 +18,7 @@ class SettingsPage extends StatelessWidget {
         scrolledUnderElevation: 0,
       ),
       body: ListView(
-        padding: const EdgeInsets.symmetric(vertical: 8),
+        padding: EdgeInsets.only(top: kToolbarHeight, bottom: 8),
         children: const [
           ListTile(
             leading: Icon(Icons.person_outline),
