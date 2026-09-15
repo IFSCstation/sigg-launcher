@@ -134,6 +134,6 @@ broken "launch arbitrary windowed games" requirement):
 
 ## House rules
 
-- No code comments (repo rule).
+- Comments are welcome (see AGENTS.md): explain "why", not "what" — race conditions, platform quirks, and non-obvious perf trade-offs stay maintainable.
 - After Dart changes: `flutter analyze` and `flutter build linux --debug`.
 - Build `--release` and measure on the Pi itself (x86 numbers don't transfer).

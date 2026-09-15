@@ -87,7 +87,7 @@ Guidance for agents and humans working on `sigg_launcher`, a Flutter (Linux/GTK)
 - **evdev permissions**: `gamepads_linux` reads `/dev/input/event*`; an active GTK session normally gets ACL access via systemd-logind automatically. If no controller is detected, `sudo usermod -aG input $USER` + re-login (no extra system package needed).
 - French quotes: prefer simple `"` in Dart strings (lints).
 - Theme/seed is green but screens intentionally use neutral `kScreenBackground` via `scaffoldBackgroundColor`, not the theme color.
-- Do not introduce comments unless asked (house rule for this repo).
+- Comments are welcome. Prefer concise "why" comments over restating what the code does; use them to explain non-obvious flows, race conditions, and platform quirks (e.g. audioplayers state machine, generation-token serialization in `bgm_player.dart`) so the codebase stays maintainable.
 
 ## Conventions
 - State updates flow through ChangeNotifier singletons (`AppController`, `NavController`) + `ListenableBuilder`/`AnimatedBuilder`; `home.dart` also `setState`s from the `NavController` listener.

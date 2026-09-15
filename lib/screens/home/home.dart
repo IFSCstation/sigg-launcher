@@ -15,6 +15,7 @@ import 'package:sigg_launcher/screens/home/widgets/user_switcher.dart';
 import 'package:sigg_launcher/services/bgm_player.dart';
 import 'package:sigg_launcher/services/game_launcher.dart';
 import 'package:sigg_launcher/services/game_loader.dart';
+import 'package:sigg_launcher/services/game_run_state.dart';
 import 'package:sigg_launcher/services/gamepad_nav.dart';
 import 'package:sigg_launcher/services/image_cache.dart';
 import 'package:sigg_launcher/services/nav_controller.dart';
@@ -46,6 +47,7 @@ class _LibraryState extends State<Library> {
   final ValueNotifier<int> _gamesIndex = ValueNotifier<int>(0);
   final ValueNotifier<bool> _headerActive = ValueNotifier<bool>(false);
   final ValueNotifier<int> _headerIndex = ValueNotifier<int>(0);
+  bool _wasGameRunning = false;
   Size _heroSize = Size.zero;
   final ScrollController _gamesScroll = ScrollController();
 
@@ -65,6 +67,7 @@ class _LibraryState extends State<Library> {
       return list;
     });
     NavController.instance.addListener(_onNavChanged);
+    GameRunState.instance.addListener(_onRunStateChanged);
     HardwareKeyboard.instance.addHandler(_onKeyEvent);
     NavController.instance.onActivate = _onActivate;
     _gamepadBridge = GamepadNavBridge(events: widget.gamepadEvents);
@@ -79,6 +82,7 @@ class _LibraryState extends State<Library> {
   @override
   void dispose() {
     NavController.instance.removeListener(_onNavChanged);
+    GameRunState.instance.removeListener(_onRunStateChanged);
     HardwareKeyboard.instance.removeHandler(_onKeyEvent);
     if (NavController.instance.onActivate == _onActivate) {
       NavController.instance.onActivate = null;
@@ -137,6 +141,26 @@ class _LibraryState extends State<Library> {
       if (index >= 0 && index < games.length) {
         _selectGame(games[index]);
       }
+    }
+  }
+
+  void _onRunStateChanged() {
+    if (!mounted) return;
+    final running = GameRunState.instance.running;
+    if (_wasGameRunning && !running) {
+      _resumeSelectedBgm();
+    }
+    _wasGameRunning = running;
+  }
+
+  void _resumeSelectedBgm() {
+    final selected = _selected.value;
+    if (selected == null) return;
+    final bgm = selected.bgmPath;
+    if (bgm != null) {
+      BgmPlayer.instance.play(bgm);
+    } else {
+      BgmPlayer.instance.stop();
     }
   }
 
