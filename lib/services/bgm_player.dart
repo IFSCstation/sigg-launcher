@@ -38,6 +38,7 @@ class BgmPlayer {
     try {
       _player ??= AudioPlayer();
       await _player!.stop();
+      await _player!.setReleaseMode(ReleaseMode.loop);
       await _player!.setVolume(0.0);
       _currentVolume = 0.0;
       await _player!.play(DeviceFileSource(file.path));
