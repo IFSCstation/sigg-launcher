@@ -1,30 +1,79 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:sigg_launcher/app_widget.dart';
 import 'package:sigg_launcher/screens/home/pages/game_trophies_page.dart';
 import 'package:sigg_launcher/screens/home/widgets/mock_games.dart';
+import 'package:sigg_launcher/screens/home/widgets/trophy_widgets.dart';
 import 'package:sigg_launcher/services/achievement_service.dart';
 import 'package:sigg_launcher/services/game_loader.dart';
+import 'package:sigg_launcher/services/page_nav_controller.dart';
 
 class AchievementsPage extends StatefulWidget {
-  const AchievementsPage({super.key});
+  const AchievementsPage({super.key, this.games, this.service});
+
+  /// Pre-computed game list (injected by Home for tests/consistency); when
+  /// null the page loads from the [kGamesFolder] registry itself.
+  final Future<List<GameEntry>>? games;
+
+  /// Test seam: the achievement daemon client. Defaults to the real one.
+  final AchievementService? service;
 
   @override
   State<AchievementsPage> createState() => _AchievementsPageState();
 }
 
 class _AchievementsPageState extends State<AchievementsPage> {
-  late Future<_TrophyIndex> _index;
+  final PageNavController _nav = PageNavController();
+  List<_GameTrophyEntry> _entries = const [];
+  List<GlobalKey>? _cardKeys;
+  bool _loading = true;
+  bool _error = false;
 
   @override
   void initState() {
     super.initState();
-    _index = _load();
+    PageFocusHub.instance.push(_nav);
+    _nav.onActivate = _activateFocused;
+    _nav.addListener(_onNavChanged);
+    _load();
   }
 
-  Future<_TrophyIndex> _load() async {
-    final games = await GameLoader(gamesFolder: kGamesFolder).load();
-    final service = AchievementService();
+  @override
+  void dispose() {
+    PageFocusHub.instance.pop(_nav);
+    _nav.removeListener(_onNavChanged);
+    _nav.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = false;
+    });
+    try {
+      final entries = await _fetch();
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _entries = entries;
+        _cardKeys = List.generate(entries.length, (_) => GlobalKey());
+      });
+      _nav.setCount(entries.length);
+    } on AchievementUnavailable {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = true;
+      });
+    }
+  }
+
+  Future<List<_GameTrophyEntry>> _fetch() async {
+    final games =
+        await (widget.games ?? GameLoader(gamesFolder: kGamesFolder).load());
+    final service = widget.service ?? AchievementService();
 
     final entries = <_GameTrophyEntry>[];
     for (final game in games) {
@@ -40,138 +89,340 @@ class _AchievementsPageState extends State<AchievementsPage> {
         throw const AchievementUnavailable();
       }
     }
-    return _TrophyIndex(entries);
+    return entries;
+  }
+
+  void _onNavChanged() {
+    if (!mounted) return;
+    setState(() {});
+    final keys = _cardKeys;
+    if (keys == null) return;
+    final index = _nav.index;
+    if (index < 0 || index >= keys.length) return;
+    final ctx = keys[index].currentContext;
+    if (ctx != null) {
+      Scrollable.ensureVisible(
+        ctx,
+        alignment: 0.1,
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+      );
+    }
+  }
+
+  void _activateFocused() {
+    final index = _nav.index;
+    if (index < 0 || index >= _entries.length) return;
+    _openGame(_entries[index]);
+  }
+
+  void _openGame(_GameTrophyEntry entry) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) =>
+            GameTrophiesPage(game: entry.game, snapshot: entry.snapshot),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
+    int earnedCount = 0;
+    int totalCount = 0;
+    for (final e in _entries) {
+      earnedCount += e.snapshot.earnedCount;
+      totalCount += e.snapshot.totalCount;
+    }
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Troféus')),
-      body: FutureBuilder<_TrophyIndex>(
-        future: _index,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState != ConnectionState.done) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (snapshot.hasError) {
-            return _Unavailable(onRetry: () {
-              setState(() => _index = _load());
-            });
-          }
-          final index = snapshot.data!;
-          final totalEarned = index.earnedCount;
-          final totalCount = index.totalCount;
+      backgroundColor: kScreenBackground,
+      appBar: AppBar(
+        title: const Text('Troféus'),
+        // Convention: submenus have no back button (B-back / Escape); the
+        // header is transparent so the screen's background shows through.
+        automaticallyImplyLeading: false,
+        backgroundColor: Colors.transparent,
+        surfaceTintColor: Colors.transparent,
+        scrolledUnderElevation: 0,
+        titleTextStyle: Theme.of(context).textTheme.titleLarge
+            ?.copyWith(fontWeight: FontWeight.w700),
+      ),
+      body: _buildBody(earnedCount, totalCount),
+    );
+  }
 
-          return ListView(
-            padding: const EdgeInsets.all(16),
-            children: [
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Row(
-                    children: [
-                      Icon(
-                        Icons.emoji_events,
-                        size: 40,
-                        color: colorScheme.primary,
-                      ),
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              '$totalEarned / $totalCount troféus',
-                              style: Theme.of(context).textTheme.titleMedium,
-                            ),
-                            const SizedBox(height: 8),
-                            ClipRRect(
-                              borderRadius: BorderRadius.circular(4),
-                              child: LinearProgressIndicator(
-                                value:
-                                    totalCount == 0 ? 0 : totalEarned / totalCount,
-                                minHeight: 8,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
+  Widget _buildBody(int earnedCount, int totalCount) {
+    if (_loading) return const Center(child: CircularProgressIndicator());
+    if (_error) return _Unavailable(onRetry: _load);
+    if (_entries.isEmpty) {
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+        children: const [
+          _SummaryBanner(earned: 0, total: 0),
+          SizedBox(height: 40),
+          _EmptyTrophies(),
+        ],
+      );
+    }
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+      children: [
+        _SummaryBanner(earned: earnedCount, total: totalCount),
+        const SizedBox(height: 20),
+        for (var i = 0; i < _entries.length; i++)
+          _GameTrophyCard(
+            key: _cardKeys![i],
+            entry: _entries[i],
+            focused: _nav.index == i,
+            onTap: () => _openGame(_entries[i]),
+          ),
+      ],
+    );
+  }
+}
+
+class _SummaryBanner extends StatelessWidget {
+  const _SummaryBanner({required this.earned, required this.total});
+
+  final int earned;
+  final int total;
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    final colorScheme = Theme.of(context).colorScheme;
+    final progress = total == 0 ? 0.0 : earned / total;
+
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(22),
+        color: const Color(0xFF1A1F27),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Row(
+          children: [
+            Container(
+              width: 56,
+              height: 56,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: kTrophyGold.withValues(alpha: 0.16),
+                border: Border.all(
+                  color: kTrophyGold.withValues(alpha: 0.55),
+                  width: 1.5,
                 ),
+                boxShadow: [
+                  BoxShadow(
+                    color: kTrophyGold.withValues(alpha: 0.35),
+                    blurRadius: 18,
+                    spreadRadius: 1,
+                  ),
+                ],
               ),
-              const SizedBox(height: 16),
-              if (index.entries.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.all(32),
-                  child: Center(
-                    child: Text('Nenhum jogo com troféus ainda.'),
-                  ),
-                ),
-              for (final entry in index.entries)
-                Card(
-                  clipBehavior: Clip.antiAlias,
-                  margin: const EdgeInsets.only(bottom: 12),
-                  child: InkWell(
-                    onTap: () {
-                      Navigator.of(context).push(
-                        MaterialPageRoute(
-                          builder: (_) => GameTrophiesPage(
-                            game: entry.game,
-                            snapshot: entry.snapshot,
-                          ),
-                        ),
-                      );
-                    },
-                    child: Row(
-                      children: [
-                        _GameThumb(game: entry.game),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                entry.game.title,
-                                style: Theme.of(context).textTheme.titleMedium,
-                              ),
-                              Text(
-                                '${entry.snapshot.earnedCount}/${entry.snapshot.totalCount} troféus',
-                                style: Theme.of(context)
-                                    .textTheme
-                                    .bodySmall
-                                    ?.copyWith(
-                                      color: colorScheme.onSurfaceVariant,
-                                    ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        const Icon(Icons.chevron_right),
-                        const SizedBox(width: 8),
-                      ],
+              child: const Icon(
+                Icons.emoji_events,
+                size: 30,
+                color: kTrophyGold,
+              ),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '$earned / $total troféus',
+                    style: textTheme.titleLarge?.copyWith(
+                      fontWeight: FontWeight.w800,
                     ),
                   ),
-                ),
-            ],
-          );
-        },
+                  const SizedBox(height: 2),
+                  Text(
+                    'Progresso total da biblioteca',
+                    style: textTheme.bodySmall?.copyWith(
+                      color: colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(999),
+                    child: LinearProgressIndicator(
+                      value: progress,
+                      minHeight: 8,
+                      backgroundColor: Colors.white.withValues(alpha: 0.1),
+                      color: kTrophyGold,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
-class _TrophyIndex {
-  const _TrophyIndex(this.entries);
+class _GameTrophyCard extends StatefulWidget {
+  const _GameTrophyCard({
+    super.key,
+    required this.entry,
+    required this.focused,
+    required this.onTap,
+  });
 
-  final List<_GameTrophyEntry> entries;
+  final _GameTrophyEntry entry;
+  final bool focused;
+  final VoidCallback onTap;
 
-  int get earnedCount =>
-      entries.fold(0, (sum, e) => sum + e.snapshot.earnedCount);
-  int get totalCount =>
-      entries.fold(0, (sum, e) => sum + e.snapshot.totalCount);
+  @override
+  State<_GameTrophyCard> createState() => _GameTrophyCardState();
+}
+
+class _GameTrophyCardState extends State<_GameTrophyCard> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    final entry = widget.entry;
+    final game = entry.game;
+    final snapshot = entry.snapshot;
+    final complete =
+        snapshot.totalCount > 0 && snapshot.earnedCount == snapshot.totalCount;
+    final focused = widget.focused;
+    final progress = snapshot.totalCount == 0
+        ? 0.0
+        : snapshot.earnedCount / snapshot.totalCount;
+
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedScale(
+          scale: _hovered ? 1.015 : 1.0,
+          duration: const Duration(milliseconds: 150),
+          curve: Curves.easeOut,
+          child: Container(
+            margin: const EdgeInsets.only(bottom: 14),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(20),
+              color: Colors.white.withValues(alpha: _hovered ? 0.07 : 0.04),
+              border: Border.all(
+                color: focused
+                    ? game.color
+                    : Colors.white.withValues(alpha: _hovered ? 0.16 : 0.09),
+                width: focused ? 3 : 1,
+              ),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                children: [
+                  _GameThumb(game: game),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                game.title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: textTheme.titleMedium?.copyWith(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w700,
+                                  shadows: const [
+                                    Shadow(
+                                      color: Colors.black54,
+                                      blurRadius: 8,
+                                      offset: Offset(0, 1),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            if (complete) ...[
+                              const SizedBox(width: 8),
+                              const _CompletePill(),
+                            ],
+                          ],
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          '${snapshot.earnedCount}/${snapshot.totalCount} troféus',
+                          style: textTheme.bodySmall?.copyWith(
+                            color: Colors.white.withValues(alpha: 0.85),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(999),
+                          child: LinearProgressIndicator(
+                            value: progress,
+                            minHeight: 6,
+                            backgroundColor: Colors.black.withValues(
+                              alpha: 0.4,
+                            ),
+                            color: complete ? kTrophyGold : game.color,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Icon(
+                    Icons.chevron_right,
+                    color: Colors.white.withValues(alpha: 0.7),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CompletePill extends StatelessWidget {
+  const _CompletePill();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: kTrophyGold,
+        borderRadius: BorderRadius.circular(999),
+        boxShadow: [
+          BoxShadow(
+            color: kTrophyGold.withValues(alpha: 0.5),
+            blurRadius: 12,
+            spreadRadius: 1,
+          ),
+        ],
+      ),
+      child: const Text(
+        'Completo!',
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w800,
+          color: Color(0xFF201A0A),
+        ),
+      ),
+    );
+  }
 }
 
 class _GameThumb extends StatelessWidget {
@@ -182,36 +433,72 @@ class _GameThumb extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final iconPath = game.iconPath;
-    if (iconPath != null) {
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(12),
-        child: Image.file(
-          File(iconPath),
-          width: 64,
-          height: 64,
-          fit: BoxFit.cover,
-          errorBuilder: (_, _, _) => _fallback,
-        ),
-      );
-    }
-    return _fallback;
+    return Container(
+      width: 56,
+      height: 56,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.45),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(14),
+        child: iconPath != null
+            ? Image.file(
+                File(iconPath),
+                width: 56,
+                height: 56,
+                fit: BoxFit.cover,
+                errorBuilder: (_, _, _) => _fallback,
+              )
+            : _fallback,
+      ),
+    );
   }
 
   Widget get _fallback => Container(
-        width: 64,
-        height: 64,
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              game.color,
-              Color.lerp(game.color, Colors.black, 0.45)!,
-            ],
+    width: 56,
+    height: 56,
+    alignment: Alignment.center,
+    decoration: BoxDecoration(color: game.color),
+    child: Icon(game.icon, color: Colors.white),
+  );
+}
+
+class _EmptyTrophies extends StatelessWidget {
+  const _EmptyTrophies();
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    final colorScheme = Theme.of(context).colorScheme;
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const TrophyEmblem(earned: false, size: 72),
+          const SizedBox(height: 20),
+          Text(
+            'Nenhum jogo com troféus ainda.',
+            style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
           ),
-        ),
-        child: Icon(game.icon, color: Colors.white),
-      );
+          const SizedBox(height: 6),
+          Text(
+            'Complete desafios nos jogos da biblioteca para ganhar troféus.',
+            textAlign: TextAlign.center,
+            style: textTheme.bodySmall?.copyWith(
+              color: colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _GameTrophyEntry {

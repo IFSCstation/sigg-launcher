@@ -12,6 +12,8 @@ import 'package:sigg_launcher/services/bgm_player.dart';
 import 'package:sigg_launcher/services/game_run_state.dart';
 import 'package:sigg_launcher/services/gamepad_nav.dart';
 import 'package:sigg_launcher/services/nav_controller.dart';
+import 'package:sigg_launcher/services/ui_sounds.dart';
+import 'package:sigg_launcher/services/page_nav_controller.dart';
 
 import 'gamepad_test_harness.dart';
 
@@ -60,10 +62,12 @@ void main() {
   setUp(() async {
     installFakeGamepads();
     BgmPlayer.instance.debugDisable();
+    UiSounds.instance.debugDisable();
     NavController.instance.debugReset();
     GamepadStatus.instance.debugReset();
     GameRunState.instance.debugReset();
     LauncherRouteObserver.instance.debugReset();
+    PageFocusHub.instance.debugReset();
   });
 
   testWidgets('d-pad moves the selection across game covers', (tester) async {
@@ -118,16 +122,18 @@ void main() {
     expect(NavController.instance.gamesIndex, 3);
   });
 
-  testWidgets(
-      'A opens the focused header page, B pops back, and nav is gated '
+  testWidgets('A opens the focused header page, B pops back, and nav is gated '
       'while a page is on top', (tester) async {
     final ctrl = StreamController<NormalizedGamepadEvent>.broadcast();
     addTearDown(ctrl.close);
     await _pumpLibrary(tester, ctrl.stream);
 
     await _tap(tester, ctrl, GamepadButton.b);
-    expect(find.byType(StorePage), findsNothing,
-        reason: 'B on the home shell must do nothing');
+    expect(
+      find.byType(StorePage),
+      findsNothing,
+      reason: 'B on the home shell must do nothing',
+    );
 
     await _tap(tester, ctrl, GamepadButton.dpadUp);
     expect(NavController.instance.isHeaderActive, isTrue);
@@ -140,8 +146,11 @@ void main() {
     expect(find.byType(StorePage), findsOneWidget);
 
     await _tap(tester, ctrl, GamepadButton.dpadRight);
-    expect(NavController.instance.headerIndex, 1,
-        reason: 'gamepad input must not leak into the home shell');
+    expect(
+      NavController.instance.headerIndex,
+      1,
+      reason: 'gamepad input must not leak into the home shell',
+    );
     expect(NavController.instance.gamesIndex, 0);
 
     await _tap(tester, ctrl, GamepadButton.b);
@@ -158,11 +167,16 @@ void main() {
     await _tap(tester, ctrl, GamepadButton.dpadRight);
     await _tap(tester, ctrl, GamepadButton.start);
 
-    expect(find.byType(StorePage), findsOneWidget,
-        reason: 'Start on the store header item must open the store');
+    expect(
+      find.byType(StorePage),
+      findsOneWidget,
+      reason: 'Start on the store header item must open the store',
+    );
   });
 
-  testWidgets('gamepad input is ignored while a game is running', (tester) async {
+  testWidgets('gamepad input is ignored while a game is running', (
+    tester,
+  ) async {
     final ctrl = StreamController<NormalizedGamepadEvent>.broadcast();
     addTearDown(ctrl.close);
     await _pumpLibrary(tester, ctrl.stream);
@@ -172,24 +186,34 @@ void main() {
 
     GameRunState.instance.setRunning(true);
     await _tap(tester, ctrl, GamepadButton.dpadRight);
-    expect(NavController.instance.gamesIndex, 1,
-        reason: 'd-pad must be ignored while a game runs');
+    expect(
+      NavController.instance.gamesIndex,
+      1,
+      reason: 'd-pad must be ignored while a game runs',
+    );
     await _tap(tester, ctrl, GamepadButton.dpadUp);
-    expect(NavController.instance.isGamesActive, isTrue,
-        reason: 'zone switching must be ignored while a game runs');
+    expect(
+      NavController.instance.isGamesActive,
+      isTrue,
+      reason: 'zone switching must be ignored while a game runs',
+    );
     await _tap(tester, ctrl, GamepadButton.a);
     await _tap(tester, ctrl, GamepadButton.b);
     expect(NavController.instance.gamesIndex, 1);
-    expect(find.byType(StorePage), findsNothing,
-        reason: 'confirm and B-back must be ignored while a game runs');
+    expect(
+      find.byType(StorePage),
+      findsNothing,
+      reason: 'confirm and B-back must be ignored while a game runs',
+    );
 
     GameRunState.instance.setRunning(false);
     await _tap(tester, ctrl, GamepadButton.dpadRight);
     expect(NavController.instance.gamesIndex, 2);
   });
 
-  testWidgets('held-direction repeat is cancelled when a game opens',
-      (tester) async {
+  testWidgets('held-direction repeat is cancelled when a game opens', (
+    tester,
+  ) async {
     final ctrl = StreamController<NormalizedGamepadEvent>.broadcast();
     addTearDown(ctrl.close);
     await _pumpLibrary(tester, ctrl.stream);
@@ -201,8 +225,11 @@ void main() {
 
     GameRunState.instance.setRunning(true);
     await tester.pump(const Duration(milliseconds: 500));
-    expect(NavController.instance.gamesIndex, 2,
-        reason: 'repeat must stop once a game is open');
+    expect(
+      NavController.instance.gamesIndex,
+      2,
+      reason: 'repeat must stop once a game is open',
+    );
 
     await _press(tester, ctrl, buttonEvent(GamepadButton.dpadRight, 0));
     await tester.pump(const Duration(milliseconds: 500));

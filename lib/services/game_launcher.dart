@@ -13,7 +13,10 @@ class GameLauncher {
     final messenger = ScaffoldMessenger.of(context);
     final exe = game.executable;
     if (exe == null || exe.trim().isEmpty) {
-      _showError(messenger, 'Nenhum executável configurado para "${game.title}".');
+      _showError(
+        messenger,
+        'Nenhum executável configurado para "${game.title}".',
+      );
       return;
     }
 
@@ -23,14 +26,15 @@ class GameLauncher {
     // (many games need the working directory to find their assets).
     final file = File(exe);
     final command = file.existsSync() ? _quote(file.absolute.path) : exe;
-    final workingDirectory = file.existsSync() ? file.absolute.parent.path : null;
+    final workingDirectory = file.existsSync()
+        ? file.absolute.parent.path
+        : null;
 
     try {
-      final process = await Process.start(
-        'sh',
-        ['-c', command],
-        workingDirectory: workingDirectory,
-      );
+      final process = await Process.start('sh', [
+        '-c',
+        command,
+      ], workingDirectory: workingDirectory);
 
       // Drain output so a chatty game never blocks on a full pipe.
       final stderr = StringBuffer();
@@ -65,8 +69,10 @@ class GameLauncher {
     Process process,
     StringBuffer stderr,
   ) async {
-    final exitCode = await process.exitCode
-        .timeout(const Duration(seconds: 3), onTimeout: () => -1);
+    final exitCode = await process.exitCode.timeout(
+      const Duration(seconds: 3),
+      onTimeout: () => -1,
+    );
     if (exitCode == 0 || exitCode == -1) return;
 
     final detail = stderr.toString().trim().isEmpty

@@ -4,6 +4,7 @@ import 'package:flutter/widgets.dart';
 import 'package:gamepads/gamepads.dart';
 import 'package:sigg_launcher/services/game_run_state.dart';
 import 'package:sigg_launcher/services/nav_controller.dart';
+import 'package:sigg_launcher/services/page_nav_controller.dart';
 
 enum _NavDir { up, down, left, right }
 
@@ -30,7 +31,8 @@ class LauncherRouteObserver extends NavigatorObserver {
 
   @override
   void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
-    if (_homeRoute == null && route.settings.name == Navigator.defaultRouteName) {
+    if (_homeRoute == null &&
+        route.settings.name == Navigator.defaultRouteName) {
       _homeRoute = route;
       _aboveHome = 0;
       return;
@@ -97,18 +99,21 @@ class GamepadNavBridge {
     Stream<NormalizedGamepadEvent>? events,
     NavController? controller,
     LauncherRouteObserver? routeObserver,
+    PageFocusHub? focusHub,
     GameRunState? runState,
     this.initialRepeatDelay = const Duration(milliseconds: 350),
     this.repeatedRepeatDelay = const Duration(milliseconds: 120),
-  })  : _controller = controller ?? NavController.instance,
-        _routeObserver = routeObserver ?? LauncherRouteObserver.instance,
-        _runState = runState ?? GameRunState.instance {
+  }) : _controller = controller ?? NavController.instance,
+       _routeObserver = routeObserver ?? LauncherRouteObserver.instance,
+       _focusHub = focusHub ?? PageFocusHub.instance,
+       _runState = runState ?? GameRunState.instance {
     _subscription = (events ?? Gamepads.normalizedEvents).listen(_onEvent);
     _runState.addListener(_onRunStateChanged);
   }
 
   final NavController _controller;
   final LauncherRouteObserver _routeObserver;
+  final PageFocusHub _focusHub;
   final GameRunState _runState;
   final Duration initialRepeatDelay;
   final Duration repeatedRepeatDelay;
@@ -120,10 +125,80 @@ class GamepadNavBridge {
     if (_runState.running) return;
     if (_routeObserver.isHomeTop) {
       _handleHomeEvent(event);
-    } else {
-      if (event.button == GamepadButton.b && event.value != 0) {
-        _routeObserver.maybeGoBack();
+      return;
+    }
+    // A pushed page owns input while it has a controller registered (trophy
+    // lists); everything else only reacts to B so back always works.
+    final page = _focusHub.active;
+    if (page != null) {
+      _handlePageEvent(event, page);
+    } else if (event.button == GamepadButton.b && event.value != 0) {
+      _routeObserver.maybeGoBack();
+    }
+  }
+
+  void _handlePageEvent(NormalizedGamepadEvent event, PageNavController page) {
+    final button = event.button;
+    if (button != null) {
+      switch (button) {
+        case GamepadButton.dpadUp:
+          _setHeld(_NavDir.up, event.value != 0);
+          break;
+        case GamepadButton.dpadDown:
+          _setHeld(_NavDir.down, event.value != 0);
+          break;
+        case GamepadButton.dpadLeft:
+          _setHeld(_NavDir.left, event.value != 0);
+          break;
+        case GamepadButton.dpadRight:
+          _setHeld(_NavDir.right, event.value != 0);
+          break;
+        case GamepadButton.a:
+        case GamepadButton.start:
+          if (event.value != 0) {
+            // Cancel held repeats so opening a page can't auto-scroll it.
+            _cancelHeld();
+            page.activate();
+          }
+          break;
+        case GamepadButton.b:
+          if (event.value != 0) {
+            _cancelHeld();
+            _routeObserver.maybeGoBack();
+          }
+          break;
+        default:
+          break;
       }
+      return;
+    }
+    switch (event.axis) {
+      case GamepadAxis.leftStickX:
+        if (event.value > 0.5) {
+          _setHeld(_NavDir.left, false);
+          _setHeld(_NavDir.right, true);
+        } else if (event.value < -0.5) {
+          _setHeld(_NavDir.right, false);
+          _setHeld(_NavDir.left, true);
+        } else {
+          _setHeld(_NavDir.left, false);
+          _setHeld(_NavDir.right, false);
+        }
+        break;
+      case GamepadAxis.leftStickY:
+        if (event.value < -0.5) {
+          _setHeld(_NavDir.up, false);
+          _setHeld(_NavDir.down, true);
+        } else if (event.value > 0.5) {
+          _setHeld(_NavDir.down, false);
+          _setHeld(_NavDir.up, true);
+        } else {
+          _setHeld(_NavDir.up, false);
+          _setHeld(_NavDir.down, false);
+        }
+        break;
+      default:
+        break;
     }
   }
 
@@ -189,10 +264,7 @@ class GamepadNavBridge {
     if (held) {
       if (existing != null) return;
       _move(dir);
-      _held[dir] = _HeldDir(
-        dir,
-        Timer(initialRepeatDelay, () => _repeat(dir)),
-      );
+      _held[dir] = _HeldDir(dir, Timer(initialRepeatDelay, () => _repeat(dir)));
     } else if (existing != null) {
       existing.timer.cancel();
       _held.remove(dir);
@@ -202,13 +274,21 @@ class GamepadNavBridge {
   void _repeat(_NavDir dir) {
     if (!_held.containsKey(dir)) return;
     _move(dir);
-    _held[dir] = _HeldDir(
-      dir,
-      Timer(repeatedRepeatDelay, () => _repeat(dir)),
-    );
+    _held[dir] = _HeldDir(dir, Timer(repeatedRepeatDelay, () => _repeat(dir)));
   }
 
   void _move(_NavDir dir) {
+    // Re-routed on every tick so a held repeat keeps following the active
+    // target across page pushes/pops.
+    if (_routeObserver.isHomeTop) {
+      _moveHome(dir);
+      return;
+    }
+    final page = _focusHub.active;
+    if (page != null) _movePage(dir, page);
+  }
+
+  void _moveHome(_NavDir dir) {
     switch (dir) {
       case _NavDir.up:
         _controller.moveUp();
@@ -221,6 +301,23 @@ class GamepadNavBridge {
         break;
       case _NavDir.right:
         _controller.moveRight();
+        break;
+    }
+  }
+
+  void _movePage(_NavDir dir, PageNavController page) {
+    switch (dir) {
+      case _NavDir.up:
+        page.moveUp();
+        break;
+      case _NavDir.down:
+        page.moveDown();
+        break;
+      case _NavDir.left:
+        page.moveLeft();
+        break;
+      case _NavDir.right:
+        page.moveRight();
         break;
     }
   }
@@ -246,10 +343,8 @@ class GamepadNavBridge {
 }
 
 class GamepadStatus extends ChangeNotifier {
-  GamepadStatus({
-    Future<List<String>> Function()? namesLoader,
-    this.events,
-  }) : _namesLoader = namesLoader ?? _loadNames;
+  GamepadStatus({Future<List<String>> Function()? namesLoader, this.events})
+    : _namesLoader = namesLoader ?? _loadNames;
 
   static final GamepadStatus instance = GamepadStatus();
 

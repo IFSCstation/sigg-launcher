@@ -1,12 +1,16 @@
 import 'package:flutter/foundation.dart';
 
+import 'ui_sounds.dart';
+
 /// The two navigable zones of the Home screen. The hero (and its Play
 /// button) is intentionally not focusable.
 enum HomeSection { header, games }
 
 /// Console-style navigation state shared by every input source (keyboard
 /// today, a gamepad later). Inputs only mutate this controller; the UI
-/// reacts through listeners.
+/// reacts through listeners. A selection tick plays whenever focus actually
+/// moves (keyboard and gamepad both route through the move methods; mouse
+/// clicks use [focusHeaderItem] and intentionally stay silent).
 class NavController extends ChangeNotifier {
   NavController._();
 
@@ -59,6 +63,7 @@ class NavController extends ChangeNotifier {
   void moveUp() {
     if (_section == HomeSection.games) {
       _section = HomeSection.header;
+      _playTick();
       notifyListeners();
     }
   }
@@ -66,6 +71,7 @@ class NavController extends ChangeNotifier {
   void moveDown() {
     if (_section == HomeSection.header) {
       _section = HomeSection.games;
+      _playTick();
       notifyListeners();
     }
   }
@@ -73,6 +79,7 @@ class NavController extends ChangeNotifier {
   void focusHeader() {
     if (_section != HomeSection.header) {
       _section = HomeSection.header;
+      _playTick();
       notifyListeners();
     }
   }
@@ -93,12 +100,14 @@ class NavController extends ChangeNotifier {
       case HomeSection.header:
         if (_headerIndex > 0) {
           _headerIndex--;
+          _playTick();
           notifyListeners();
         }
         break;
       case HomeSection.games:
         if (_gamesIndex > 0) {
           _gamesIndex--;
+          _playTick();
           notifyListeners();
         }
         break;
@@ -110,12 +119,14 @@ class NavController extends ChangeNotifier {
       case HomeSection.header:
         if (_headerIndex < headerCount - 1) {
           _headerIndex++;
+          _playTick();
           notifyListeners();
         }
         break;
       case HomeSection.games:
         if (_gamesCount > 0 && _gamesIndex < _gamesCount - 1) {
           _gamesIndex++;
+          _playTick();
           notifyListeners();
         }
         break;
@@ -126,5 +137,13 @@ class NavController extends ChangeNotifier {
   /// the Home screen via [onActivate], so gamepad input can trigger it too.
   void activate() {
     onActivate?.call();
+  }
+
+  /// Console selection blip, fired every time focus actually moves. Played
+  /// from here — not the UI listener — so keyboard, gamepad and synthetic
+  /// inputs all sound the same, while mouse-driven paths ([focusHeaderItem],
+  /// taps) stay silent.
+  void _playTick() {
+    UiSounds.instance.selectionChanged();
   }
 }

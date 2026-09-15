@@ -1,4 +1,4 @@
-import 'dart:io';
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -49,23 +49,23 @@ class _LibraryState extends State<Library> {
   final ValueNotifier<int> _headerIndex = ValueNotifier<int>(0);
   bool _wasGameRunning = false;
   Size _heroSize = Size.zero;
+  Timer? _preloadDebounce;
   final ScrollController _gamesScroll = ScrollController();
 
   @override
   void initState() {
     super.initState();
-    _games = (widget.games ??
-            GameLoader(gamesFolder: kGamesFolder).load())
+    _games = (widget.games ?? GameLoader(gamesFolder: kGamesFolder).load())
         .then((list) {
-      _gamesList = list;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
-          NavController.instance.setGamesCount(list.length);
-          if (list.isNotEmpty) _preloadAdjacent(list.first);
-        }
-      });
-      return list;
-    });
+          _gamesList = list;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) {
+              NavController.instance.setGamesCount(list.length);
+              if (list.isNotEmpty) _preloadAdjacent(list.first);
+            }
+          });
+          return list;
+        });
     NavController.instance.addListener(_onNavChanged);
     GameRunState.instance.addListener(_onRunStateChanged);
     HardwareKeyboard.instance.addHandler(_onKeyEvent);
@@ -89,6 +89,7 @@ class _LibraryState extends State<Library> {
     }
     _gamepadBridge.dispose();
     GamepadStatus.instance.stop();
+    _preloadDebounce?.cancel();
     _selected.dispose();
     _gamesActive.dispose();
     _gamesIndex.dispose();
@@ -102,10 +103,18 @@ class _LibraryState extends State<Library> {
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return false;
     }
-    // Only drive navigation while Home is the active route; a pushed page
-    // (store/settings/profile) must not leak keys into the launcher.
+    // Only drive navigation while Home is the active route. The Launcher
+    // keyboard listener stays alive under pushed submenus, so it owns the
+    // Escape-back shortcut there (submenus have no back button; gamepad B is
+    // the primary way out and keyboard users get Escape).
     final route = ModalRoute.of(context);
-    if (route == null || !route.isCurrent) return false;
+    if (route == null || !route.isCurrent) {
+      if (event.logicalKey == LogicalKeyboardKey.escape) {
+        Navigator.of(context).maybePop();
+        return true;
+      }
+      return false;
+    }
     switch (event.logicalKey) {
       case LogicalKeyboardKey.arrowUp:
         NavController.instance.moveUp();
@@ -182,7 +191,7 @@ class _LibraryState extends State<Library> {
         _openPage(const StorePage());
         break;
       case 2:
-        _openPage(const AchievementsPage());
+        _openPage(AchievementsPage(games: Future.value(_gamesList)));
         break;
       case 3:
         _openPage(const SettingsPage());
@@ -199,18 +208,8 @@ class _LibraryState extends State<Library> {
 
   void _selectGame(GameEntry game) {
     if (identical(_selected.value, game)) return;
-    final previous = _selected.value;
     _selected.value = game;
-    _preloadAdjacent(game);
-    final prevHero = previous?.heroPath;
-    if (prevHero != null &&
-        prevHero != game.heroPath &&
-        !_isNeighbor(previous, game)) {
-      Future.delayed(const Duration(milliseconds: 400), () {
-        if (!mounted) return;
-        PaintingBinding.instance.imageCache.evict(FileImage(File(prevHero)));
-      });
-    }
+    _scheduleHeroPreload(game);
     final bgm = game.bgmPath;
     if (bgm != null) {
       BgmPlayer.instance.play(bgm);
@@ -219,13 +218,16 @@ class _LibraryState extends State<Library> {
     }
   }
 
-  bool _isNeighbor(GameEntry? previous, GameEntry game) {
-    final games = _gamesList;
-    if (games.isEmpty || previous == null) return false;
-    final prevIndex = games.indexOf(previous);
-    final index = games.indexOf(game);
-    if (prevIndex < 0 || index < 0) return false;
-    return (prevIndex - index).abs() <= 2;
+  void _scheduleHeroPreload(GameEntry game) {
+    // Debounced: a fast burst of moves settles into a single preload of the
+    // final hero's neighborhood instead of re-decoding 5 heroes per keystroke
+    // (which saturated the image cache and force-evicted completers mid-frame,
+    // triggering the Flutter framework "_nextFrame != null" animation race).
+    _preloadDebounce?.cancel();
+    _preloadDebounce = Timer(
+      const Duration(milliseconds: 150),
+      () => _preloadAdjacent(game),
+    );
   }
 
   void _preloadAdjacent(GameEntry game) {
@@ -263,8 +265,10 @@ class _LibraryState extends State<Library> {
                   final ratioHeroHeight =
                       constraints.maxWidth / heroAspectRatio;
                   final maxHeroHeight =
-                      (constraints.maxHeight - _gamesSectionMinHeight)
-                          .clamp(0.0, double.infinity);
+                      (constraints.maxHeight - _gamesSectionMinHeight).clamp(
+                        0.0,
+                        double.infinity,
+                      );
                   final heroHeight = math.min(ratioHeroHeight, maxHeroHeight);
                   _heroSize = Size(constraints.maxWidth, heroHeight);
 
@@ -282,8 +286,7 @@ class _LibraryState extends State<Library> {
                                   final selected =
                                       _selected.value ?? games.first;
                                   return AnimatedSwitcher(
-                                    duration:
-                                        const Duration(milliseconds: 300),
+                                    duration: const Duration(milliseconds: 300),
                                     switchInCurve: Curves.easeOut,
                                     switchOutCurve: Curves.easeInOut,
                                     transitionBuilder: (child, animation) {
@@ -305,25 +308,24 @@ class _LibraryState extends State<Library> {
                               left: 0,
                               right: 0,
                               child: ListenableBuilder(
-                                listenable: Listenable.merge(
-                                    [_headerActive, _headerIndex]),
+                                listenable: Listenable.merge([
+                                  _headerActive,
+                                  _headerIndex,
+                                ]),
                                 builder: (context, _) {
                                   return Header(
                                     active: _headerActive.value,
                                     focusedIndex: _headerIndex.value,
                                     onStoreTap: () {
-                                      NavController.instance
-                                          .focusHeaderItem(1);
+                                      NavController.instance.focusHeaderItem(1);
                                       _openPage(const StorePage());
                                     },
                                     onTrophiesTap: () {
-                                      NavController.instance
-                                          .focusHeaderItem(2);
+                                      NavController.instance.focusHeaderItem(2);
                                       _openPage(const AchievementsPage());
                                     },
                                     onSettingsTap: () {
-                                      NavController.instance
-                                          .focusHeaderItem(3);
+                                      NavController.instance.focusHeaderItem(3);
                                       _openPage(const SettingsPage());
                                     },
                                   );
@@ -343,8 +345,11 @@ class _LibraryState extends State<Library> {
                               children: [
                                 Expanded(
                                   child: ListenableBuilder(
-                                    listenable: Listenable.merge(
-                                        [_gamesActive, _gamesIndex, _selected]),
+                                    listenable: Listenable.merge([
+                                      _gamesActive,
+                                      _gamesIndex,
+                                      _selected,
+                                    ]),
                                     builder: (context, _) {
                                       return GamesRow(
                                         games: games,
@@ -384,14 +389,15 @@ class _FadeIn extends StatefulWidget {
   State<_FadeIn> createState() => _FadeInState();
 }
 
-class _FadeInState extends State<_FadeIn>
-    with SingleTickerProviderStateMixin {
+class _FadeInState extends State<_FadeIn> with SingleTickerProviderStateMixin {
   late final AnimationController _controller = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 450),
   )..forward();
-  late final Animation<double> _opacity =
-      CurvedAnimation(parent: _controller, curve: Curves.easeOut);
+  late final Animation<double> _opacity = CurvedAnimation(
+    parent: _controller,
+    curve: Curves.easeOut,
+  );
 
   @override
   void dispose() {

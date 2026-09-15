@@ -12,6 +12,7 @@ import 'package:sigg_launcher/services/bgm_player.dart';
 import 'package:sigg_launcher/services/game_loader.dart';
 import 'package:sigg_launcher/services/gamepad_nav.dart';
 import 'package:sigg_launcher/services/nav_controller.dart';
+import 'package:sigg_launcher/services/ui_sounds.dart';
 
 import 'gamepad_test_harness.dart';
 
@@ -56,6 +57,7 @@ void main() {
     await killGameProcesses();
     installFakeGamepads();
     BgmPlayer.instance.debugDisable();
+    UiSounds.instance.debugDisable();
     NavController.instance.debugReset();
     GamepadStatus.instance.debugReset();
     LauncherRouteObserver.instance.debugReset();
@@ -140,7 +142,7 @@ void main() {
       );
       await expectNoLaunch(tester);
 
-      await tester.pageBack();
+      await pressKey(tester, LogicalKeyboardKey.escape);
       await settle(tester);
 
       expect(

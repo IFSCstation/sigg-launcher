@@ -34,7 +34,10 @@ class _FpsCounterState extends State<FpsCounter> {
     super.initState();
     if (FpsCounter.enabled) {
       SchedulerBinding.instance.addTimingsCallback(_onTimings);
-      _timer = Timer.periodic(const Duration(milliseconds: 250), (_) => _refresh());
+      _timer = Timer.periodic(
+        const Duration(milliseconds: 250),
+        (_) => _refresh(),
+      );
     }
   }
 
@@ -70,7 +73,10 @@ class _FpsCounterState extends State<FpsCounter> {
       if (frame.totalSpan.inMicroseconds > 16666) dropped++;
     }
     final sorted = List<double>.of(rasters)..sort();
-    final p95Index = ((sorted.length * 0.95).ceil() - 1).clamp(0, sorted.length - 1);
+    final p95Index = ((sorted.length * 0.95).ceil() - 1).clamp(
+      0,
+      sorted.length - 1,
+    );
 
     setState(() {
       _fps = _frames.length.toDouble();

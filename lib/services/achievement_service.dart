@@ -57,8 +57,8 @@ class Trophy {
           ),
       ],
       counters: {
-        for (final entry in (json['counters'] as Map<String, dynamic>? ?? {})
-            .entries)
+        for (final entry
+            in (json['counters'] as Map<String, dynamic>? ?? {}).entries)
           entry.key: (entry.value as num).toInt(),
       },
     );
@@ -96,7 +96,7 @@ class GameSnapshot {
 
 class AchievementService {
   AchievementService({String? socketPath})
-      : socketPath = socketPath ?? defaultSocketPath();
+    : socketPath = socketPath ?? defaultSocketPath();
 
   final String socketPath;
 
@@ -117,8 +117,10 @@ class AchievementService {
   }
 
   Future<Map<String, dynamic>> _request(Map<String, dynamic> body) async {
-    final socket =
-        await Socket.connect(InternetAddress(socketPath, type: InternetAddressType.unix), 0);
+    final socket = await Socket.connect(
+      InternetAddress(socketPath, type: InternetAddressType.unix),
+      0,
+    );
     try {
       socket.add(
         utf8.encode('${jsonEncode({'v': _protocolVersion, ...body})}\n'),
@@ -132,7 +134,10 @@ class AchievementService {
       }
       final line = utf8.decode(chunks).trim();
       if (line.isEmpty) {
-        throw const AchievementException('internal', 'empty response from daemon');
+        throw const AchievementException(
+          'internal',
+          'empty response from daemon',
+        );
       }
       final decoded = jsonDecode(line) as Map<String, dynamic>;
       if (decoded['ok'] != true) {

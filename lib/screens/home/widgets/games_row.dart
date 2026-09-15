@@ -79,11 +79,15 @@ class _GamesRowState extends State<GamesRow> {
     final index = widget.focusIndex;
     if (index < 0 || index >= widget.games.length) return;
 
-    final target = _leftPadding +
+    final target =
+        _leftPadding +
         index * (_coverWidth + _separatorWidth) +
         _coverWidth / 2 -
         controller.position.viewportDimension / 2;
-    final targetClamped = target.clamp(0.0, controller.position.maxScrollExtent);
+    final targetClamped = target.clamp(
+      0.0,
+      controller.position.maxScrollExtent,
+    );
     if ((targetClamped - controller.offset).abs() > 2) {
       controller.animateTo(
         targetClamped,
@@ -100,8 +104,10 @@ class _GamesRowState extends State<GamesRow> {
       duration: const Duration(milliseconds: 200),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final coverHeight =
-              (constraints.maxHeight - _footerHeight).clamp(80.0, 300.0);
+          final coverHeight = (constraints.maxHeight - _footerHeight).clamp(
+            80.0,
+            300.0,
+          );
           _coverWidth = coverHeight * coverAspectRatio;
           return ListView.separated(
             controller: _controller,
@@ -112,9 +118,7 @@ class _GamesRowState extends State<GamesRow> {
                 const SizedBox(width: _separatorWidth),
             itemBuilder: (context, index) {
               if (index == widget.games.length) {
-                return RepaintBoundary(
-                  child: _SeeAllCard(width: _coverWidth),
-                );
+                return RepaintBoundary(child: _SeeAllCard(width: _coverWidth));
               }
               final game = widget.games[index];
               return RepaintBoundary(
@@ -335,9 +339,7 @@ class _SeeAllCard extends StatelessWidget {
             'Ver todos',
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: textTheme.titleMedium?.copyWith(
-              fontWeight: FontWeight.w700,
-            ),
+            style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
           ),
         ],
       ),

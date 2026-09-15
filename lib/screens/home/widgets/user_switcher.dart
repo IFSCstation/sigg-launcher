@@ -32,7 +32,9 @@ class _UserSwitcherPageState extends State<_UserSwitcherPage> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _centerCurrentProfile());
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _centerCurrentProfile(),
+    );
   }
 
   @override
@@ -44,8 +46,9 @@ class _UserSwitcherPageState extends State<_UserSwitcherPage> {
   void _centerCurrentProfile() {
     if (!mounted || !_scrollController.hasClients) return;
     final users = AppController.instance.users;
-    final index = users
-        .indexWhere((u) => identical(u, AppController.instance.currentUser));
+    final index = users.indexWhere(
+      (u) => identical(u, AppController.instance.currentUser),
+    );
     if (index < 0) return;
     final viewport = _scrollController.position.viewportDimension;
     final target = 8 + (index * _itemWidth) + (_itemWidth / 2) - (viewport / 2);
@@ -66,10 +69,7 @@ class _UserSwitcherPageState extends State<_UserSwitcherPage> {
           gradient: RadialGradient(
             radius: 1.4,
             center: const Alignment(0, -0.7),
-            colors: [
-              colorScheme.surfaceContainerHighest,
-              colorScheme.surface,
-            ],
+            colors: [colorScheme.surfaceContainerHighest, colorScheme.surface],
           ),
         ),
         child: SafeArea(
@@ -89,11 +89,7 @@ class _UserSwitcherPageState extends State<_UserSwitcherPage> {
                 ),
               ),
               const Spacer(),
-              Icon(
-                Icons.sports_esports,
-                size: 56,
-                color: colorScheme.primary,
-              ),
+              Icon(Icons.sports_esports, size: 56, color: colorScheme.primary),
               const SizedBox(height: 16),
               Text(
                 'Quem está jogando?',
@@ -124,10 +120,7 @@ class _UserSwitcherPageState extends State<_UserSwitcherPage> {
                         width: _itemWidth,
                         child: _ProfileCircle(user: user),
                       ),
-                    SizedBox(
-                      width: _itemWidth,
-                      child: const _AddUserCircle(),
-                    ),
+                    SizedBox(width: _itemWidth, child: const _AddUserCircle()),
                     const SizedBox(width: 8),
                   ],
                 ),
@@ -268,10 +261,7 @@ class _AddUserCircle extends StatelessWidget {
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               color: colorScheme.surfaceContainerHighest,
-              border: Border.all(
-                color: colorScheme.outlineVariant,
-                width: 2,
-              ),
+              border: Border.all(color: colorScheme.outlineVariant, width: 2),
             ),
             child: Icon(
               Icons.add,

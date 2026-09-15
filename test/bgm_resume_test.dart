@@ -11,6 +11,7 @@ import 'package:sigg_launcher/services/bgm_player.dart';
 import 'package:sigg_launcher/services/game_run_state.dart';
 import 'package:sigg_launcher/services/gamepad_nav.dart';
 import 'package:sigg_launcher/services/nav_controller.dart';
+import 'package:sigg_launcher/services/ui_sounds.dart';
 
 import 'gamepad_test_harness.dart';
 
@@ -36,6 +37,7 @@ void main() {
   setUp(() async {
     installFakeGamepads();
     BgmPlayer.instance.debugDisable();
+    UiSounds.instance.debugDisable();
     GameRunState.instance.debugReset();
     NavController.instance.debugReset();
     GamepadStatus.instance.debugReset();
@@ -69,7 +71,11 @@ void main() {
       final base = '${tempRoot.path}/$id';
       entries.add(
         GameEntry(
-          id == 'game-a' ? 'Game A' : id == 'game-b' ? 'Game B' : 'Game C',
+          id == 'game-a'
+              ? 'Game A'
+              : id == 'game-b'
+              ? 'Game B'
+              : 'Game C',
           'Tagline $id',
           'Genre',
           Icons.sports_esports,
@@ -85,10 +91,7 @@ void main() {
     return entries;
   }
 
-  Future<void> pumpLibrary(
-    WidgetTester tester,
-    List<GameEntry> entries,
-  ) async {
+  Future<void> pumpLibrary(WidgetTester tester, List<GameEntry> entries) async {
     await tester.binding.setSurfaceSize(const Size(1280, 720));
     await tester.pumpWidget(
       MaterialApp(
@@ -100,8 +103,9 @@ void main() {
     await settle(tester);
   }
 
-  testWidgets('launching a game resumes the selected game BGM on exit',
-      (tester) async {
+  testWidgets('launching a game resumes the selected game BGM on exit', (
+    tester,
+  ) async {
     final entries = makeEntries(['game-b']);
     await pumpLibrary(tester, entries);
 
@@ -125,8 +129,9 @@ void main() {
     );
   });
 
-  testWidgets('closing a game with no BGM requests no new playback',
-      (tester) async {
+  testWidgets('closing a game with no BGM requests no new playback', (
+    tester,
+  ) async {
     final entries = makeEntries(['game-b']);
     await pumpLibrary(tester, entries);
 

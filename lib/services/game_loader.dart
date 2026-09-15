@@ -58,8 +58,10 @@ class GameLoader {
 
   bool _isSlug(String value) =>
       value.isNotEmpty &&
-      value.codeUnits.every((u) =>
-          (u >= 0x61 && u <= 0x7a) || (u >= 0x30 && u <= 0x39) || u == 0x2d);
+      value.codeUnits.every(
+        (u) =>
+            (u >= 0x61 && u <= 0x7a) || (u >= 0x30 && u <= 0x39) || u == 0x2d,
+      );
 
   String? _findImage(String folderPath, String name) {
     for (final ext in [..._animatedExtensions, ..._staticExtensions]) {
@@ -80,7 +82,12 @@ class GameLoader {
   String _abs(String path) => File(path).absolute.path;
 
   GameEntry _buildEntry(
-    String folderPath, String id, String heroPath, String coverPath, String? iconPath) {
+    String folderPath,
+    String id,
+    String heroPath,
+    String coverPath,
+    String? iconPath,
+  ) {
     final info = _readGameJson('$folderPath/metadata/game.json');
 
     final mediaDir = '$folderPath/media';

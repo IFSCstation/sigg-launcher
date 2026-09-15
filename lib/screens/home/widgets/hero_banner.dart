@@ -20,8 +20,10 @@ class HeroBanner extends StatelessWidget {
         builder: (context, constraints) {
           final dpr = MediaQuery.devicePixelRatioOf(context);
           final cacheWidth = math.max(1, (constraints.maxWidth * dpr).round());
-          final cacheHeight =
-              math.max(1, (constraints.maxHeight * dpr).round());
+          final cacheHeight = math.max(
+            1,
+            (constraints.maxHeight * dpr).round(),
+          );
 
           final Widget? art = game.heroPath != null
               ? Image.file(
@@ -35,26 +37,26 @@ class HeroBanner extends StatelessWidget {
                       const SizedBox.shrink(),
                 )
               : game.imageAsset != null
-                  ? Image.asset(
-                      game.imageAsset!,
-                      fit: BoxFit.cover,
-                      gaplessPlayback: true,
-                      cacheWidth: cacheWidth,
-                      cacheHeight: cacheHeight,
-                      filterQuality: FilterQuality.medium,
-                    )
-                  : game.imageUrl != null
-                      ? Image.network(
-                          game.imageUrl!,
-                          fit: BoxFit.cover,
-                          gaplessPlayback: true,
-                          cacheWidth: cacheWidth,
-                          cacheHeight: cacheHeight,
-                          filterQuality: FilterQuality.medium,
-                          errorBuilder: (context, error, stackTrace) =>
-                              const SizedBox.shrink(),
-                        )
-                      : null;
+              ? Image.asset(
+                  game.imageAsset!,
+                  fit: BoxFit.cover,
+                  gaplessPlayback: true,
+                  cacheWidth: cacheWidth,
+                  cacheHeight: cacheHeight,
+                  filterQuality: FilterQuality.medium,
+                )
+              : game.imageUrl != null
+              ? Image.network(
+                  game.imageUrl!,
+                  fit: BoxFit.cover,
+                  gaplessPlayback: true,
+                  cacheWidth: cacheWidth,
+                  cacheHeight: cacheHeight,
+                  filterQuality: FilterQuality.medium,
+                  errorBuilder: (context, error, stackTrace) =>
+                      const SizedBox.shrink(),
+                )
+              : null;
 
           return Stack(
             fit: StackFit.expand,
@@ -72,9 +74,7 @@ class HeroBanner extends StatelessWidget {
                 ),
               ),
               if (art != null) ...[
-                Positioned.fill(
-                  child: RepaintBoundary(child: art),
-                ),
+                Positioned.fill(child: RepaintBoundary(child: art)),
                 Positioned.fill(
                   child: RepaintBoundary(
                     child: CustomPaint(painter: _HeroScrimPainter()),
@@ -107,9 +107,7 @@ class HeroBanner extends StatelessWidget {
                         ],
                       ),
                     ),
-                    SizedBox(
-                      height: constraints.maxHeight * 0.04,
-                    ),
+                    SizedBox(height: constraints.maxHeight * 0.04),
                     ConstrainedBox(
                       constraints: BoxConstraints(
                         maxWidth: constraints.maxWidth * 0.5,
@@ -163,24 +161,30 @@ class _HeroScrimPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final rect = Offset.zero & size;
-    _paintGradient(canvas, rect, Alignment.topCenter, Alignment.bottomCenter,
-        const [0, 0.3, 1], const [
-      Color(0x73000000),
-      Color(0x26000000),
-      Colors.transparent,
-    ]);
-    _paintGradient(canvas, rect, Alignment.bottomCenter, Alignment.topCenter,
-        const [0, 0.35, 1], const [
-      Color(0xB8000000),
-      Color(0x47000000),
-      Colors.transparent,
-    ]);
-    _paintGradient(canvas, rect, Alignment.centerLeft, Alignment.centerRight,
-        const [0, 0.45, 1], const [
-      Color(0x99000000),
-      Color(0x26000000),
-      Color(0x4D000000),
-    ]);
+    _paintGradient(
+      canvas,
+      rect,
+      Alignment.topCenter,
+      Alignment.bottomCenter,
+      const [0, 0.3, 1],
+      const [Color(0x73000000), Color(0x26000000), Colors.transparent],
+    );
+    _paintGradient(
+      canvas,
+      rect,
+      Alignment.bottomCenter,
+      Alignment.topCenter,
+      const [0, 0.35, 1],
+      const [Color(0xB8000000), Color(0x47000000), Colors.transparent],
+    );
+    _paintGradient(
+      canvas,
+      rect,
+      Alignment.centerLeft,
+      Alignment.centerRight,
+      const [0, 0.45, 1],
+      const [Color(0x99000000), Color(0x26000000), Color(0x4D000000)],
+    );
   }
 
   void _paintGradient(
