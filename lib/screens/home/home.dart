@@ -12,6 +12,7 @@ import 'package:sigg_launcher/screens/home/widgets/header.dart';
 import 'package:sigg_launcher/screens/home/widgets/hero_banner.dart';
 import 'package:sigg_launcher/screens/home/widgets/mock_games.dart';
 import 'package:sigg_launcher/screens/home/widgets/user_switcher.dart';
+import 'package:sigg_launcher/services/achievement_service.dart';
 import 'package:sigg_launcher/services/bgm_player.dart';
 import 'package:sigg_launcher/services/game_launcher.dart';
 import 'package:sigg_launcher/services/game_loader.dart';
@@ -19,11 +20,17 @@ import 'package:sigg_launcher/services/game_run_state.dart';
 import 'package:sigg_launcher/services/gamepad_nav.dart';
 import 'package:sigg_launcher/services/image_cache.dart';
 import 'package:sigg_launcher/services/nav_controller.dart';
+import 'package:sigg_launcher/services/page_nav_controller.dart';
 
 const double _gamesSectionMinHeight = 240;
 
 class Library extends StatefulWidget {
-  const Library({super.key, this.games, this.gamepadEvents});
+  const Library({
+    super.key,
+    this.games,
+    this.gamepadEvents,
+    this.achievementsService,
+  });
 
   /// Pre-computed game list. Used by tests to inject a future resolved
   /// outside of Flutter's fake-async test zone; when null the screen loads
@@ -33,6 +40,11 @@ class Library extends StatefulWidget {
   /// Gamepad event source. Used by tests to drive navigation with synthetic
   /// events; when null the real [Gamepads.normalizedEvents] stream is used.
   final Stream<NormalizedGamepadEvent>? gamepadEvents;
+
+  /// Trophy daemon client. Used by tests to inject a fake daemon into the
+  /// trophies submenu; when null the real unix-socket [AchievementService] is
+  /// used (it just fails to connect and the page shows the unavailable state).
+  final AchievementService? achievementsService;
 
   @override
   State<Library> createState() => _LibraryState();
@@ -105,15 +117,39 @@ class _LibraryState extends State<Library> {
     }
     // Only drive navigation while Home is the active route. The Launcher
     // keyboard listener stays alive under pushed submenus, so it owns the
-    // Escape-back shortcut there (submenus have no back button; gamepad B is
-    // the primary way out and keyboard users get Escape).
+    // keyboard back shortcut there (submenus have no back button; gamepad B is
+    // the primary way out and keyboard users get Escape). It also drives the
+    // D-pad-navigable submenus (trophies) with the same keys the gamepad
+    // bridge uses: arrows move the topmost page's focus, Enter/Space confirm,
+    // Escape backs out. Any other pushed page (store/settings/dialog) owns no
+    // focus controller, so arrows are inert there — exact gamepad parity.
     final route = ModalRoute.of(context);
     if (route == null || !route.isCurrent) {
-      if (event.logicalKey == LogicalKeyboardKey.escape) {
-        Navigator.of(context).maybePop();
-        return true;
+      final page = PageFocusHub.instance.active;
+      switch (event.logicalKey) {
+        case LogicalKeyboardKey.arrowUp:
+          page?.moveUp();
+          return page != null;
+        case LogicalKeyboardKey.arrowDown:
+          page?.moveDown();
+          return page != null;
+        case LogicalKeyboardKey.arrowLeft:
+          page?.moveLeft();
+          return page != null;
+        case LogicalKeyboardKey.arrowRight:
+          page?.moveRight();
+          return page != null;
+        case LogicalKeyboardKey.enter:
+        case LogicalKeyboardKey.numpadEnter:
+        case LogicalKeyboardKey.space:
+          page?.activate();
+          return page != null;
+        case LogicalKeyboardKey.escape:
+          Navigator.of(context).maybePop();
+          return true;
+        default:
+          return false;
       }
-      return false;
     }
     switch (event.logicalKey) {
       case LogicalKeyboardKey.arrowUp:
@@ -191,7 +227,10 @@ class _LibraryState extends State<Library> {
         _openPage(const StorePage());
         break;
       case 2:
-        _openPage(AchievementsPage(games: Future.value(_gamesList)));
+        _openPage(AchievementsPage(
+          games: Future.value(_gamesList),
+          service: widget.achievementsService,
+        ));
         break;
       case 3:
         _openPage(const SettingsPage());
@@ -322,7 +361,10 @@ class _LibraryState extends State<Library> {
                                     },
                                     onTrophiesTap: () {
                                       NavController.instance.focusHeaderItem(2);
-                                      _openPage(const AchievementsPage());
+                                      _openPage(AchievementsPage(
+              games: Future.value(_gamesList),
+              service: widget.achievementsService,
+            ));
                                     },
                                     onSettingsTap: () {
                                       NavController.instance.focusHeaderItem(3);
