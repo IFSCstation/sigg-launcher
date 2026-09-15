@@ -17,27 +17,33 @@ class UserWidget extends StatelessWidget {
       animation: AppController.instance,
       builder: (context, child) {
         final user = AppController.instance.currentUser;
-        return InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(20),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              CircleAvatar(
-                key: avatarKey,
-                radius: 24,
-                backgroundColor: user.avatarColor,
-                foregroundColor: Colors.white,
-                backgroundImage: user.avatarPath != null
-                    ? FileImage(File(user.avatarPath!))
-                    : null,
-                child: user.avatarPath == null
-                    ? Icon(user.icon, size: 32)
-                    : null,
-              ),
-              const SizedBox(width: 12),
-              Text(user.nickname, style: Theme.of(context).textTheme.titleLarge),
-            ],
+        return Tooltip(
+          message: 'Trocar de usuário',
+          child: InkWell(
+            onTap: onTap,
+            borderRadius: BorderRadius.circular(20),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircleAvatar(
+                  key: avatarKey,
+                  radius: 24,
+                  backgroundColor: user.avatarColor,
+                  foregroundColor: Colors.white,
+                  backgroundImage: user.avatarPath != null
+                      ? FileImage(File(user.avatarPath!))
+                      : null,
+                  child: user.avatarPath == null
+                      ? Icon(user.icon, size: 32)
+                      : null,
+                ),
+                const SizedBox(width: 12),
+                Text(
+                  user.nickname,
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+              ],
+            ),
           ),
         );
       },

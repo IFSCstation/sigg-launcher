@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:sigg_launcher/screens/home/widgets/clock.dart';
 import 'package:sigg_launcher/screens/home/widgets/user_widget.dart';
@@ -20,8 +22,8 @@ class GamepadIndicator extends StatelessWidget {
         return Tooltip(
           message: connected
               ? (status.namesLabel.isEmpty
-                  ? 'Controle conectado'
-                  : status.namesLabel)
+                    ? 'Controle conectado'
+                    : status.namesLabel)
               : '',
           child: Icon(
             Icons.sports_esports,
@@ -60,6 +62,13 @@ class Header extends StatefulWidget {
 }
 
 class _HeaderState extends State<Header> with WidgetsBindingObserver {
+  static const List<String> _tooltipLabels = [
+    'Perfil',
+    'IFSCstation Store',
+    'Troféus',
+    'Configurações',
+  ];
+
   final GlobalKey _stackKey = GlobalKey();
   final Map<int, GlobalKey> _itemKeys = {
     0: GlobalKey(),
@@ -69,6 +78,8 @@ class _HeaderState extends State<Header> with WidgetsBindingObserver {
   };
 
   Rect? _indicatorRect;
+  double? _tooltipAnchorX;
+  double? _tooltipBottom;
   bool _animateIndicator = false;
 
   @override
@@ -111,16 +122,27 @@ class _HeaderState extends State<Header> with WidgetsBindingObserver {
     if (itemBox == null || !itemBox.attached) return;
 
     final topLeft = itemBox.localToGlobal(Offset.zero, ancestor: stackBox);
-    final inflated = (topLeft & itemBox.size).inflate(4);
+    final itemRect = topLeft & itemBox.size;
+    const halfTooltip = 110.0;
+    final minX = halfTooltip;
+    final maxX = math.max(minX, stackBox.size.width - minX);
+    final tooltipAnchorX = itemRect.center.dx.clamp(minX, maxX);
+    final inflated = itemRect.inflate(4);
     final rect = Rect.fromLTRB(
       inflated.left.clamp(0.0, stackBox.size.width),
       inflated.top.clamp(0.0, stackBox.size.height),
       inflated.right.clamp(0.0, stackBox.size.width),
       inflated.bottom.clamp(0.0, stackBox.size.height),
     );
-    if (rect == _indicatorRect) return;
+    if (rect == _indicatorRect &&
+        tooltipAnchorX == _tooltipAnchorX &&
+        itemRect.bottom == _tooltipBottom) {
+      return;
+    }
     setState(() {
       _indicatorRect = rect;
+      _tooltipAnchorX = tooltipAnchorX;
+      _tooltipBottom = itemRect.bottom;
       _animateIndicator = true;
     });
   }
@@ -159,6 +181,55 @@ class _HeaderState extends State<Header> with WidgetsBindingObserver {
     );
   }
 
+  Widget _buildFocusTooltip() {
+    final anchorX = _tooltipAnchorX;
+    final bottom = _tooltipBottom;
+    if (!widget.active || anchorX == null || bottom == null) {
+      return const Positioned(left: 0, top: 0, child: SizedBox.shrink());
+    }
+    final label = _tooltipLabels[widget.focusedIndex];
+    return AnimatedPositioned(
+      left: anchorX,
+      top: bottom + 8,
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeOutCubic,
+      child: FractionalTranslation(
+        translation: const Offset(-0.5, 0),
+        child: TweenAnimationBuilder<double>(
+          key: ValueKey(label),
+          tween: Tween(begin: 0.0, end: 1.0),
+          duration: const Duration(milliseconds: 150),
+          curve: Curves.easeOut,
+          builder: (context, value, child) => Opacity(
+            opacity: value,
+            child: Transform.translate(
+              offset: Offset(0, 6 * (1 - value)),
+              child: child,
+            ),
+          ),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: const Color(0xFF1F2430),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: Colors.white12),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Text(
+                label,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 13,
+                  letterSpacing: 0.2,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return AnimatedOpacity(
@@ -166,56 +237,58 @@ class _HeaderState extends State<Header> with WidgetsBindingObserver {
       duration: const Duration(milliseconds: 200),
       child: RepaintBoundary(
         child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-        child: Stack(
-          key: _stackKey,
-          children: [
-            Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: ExcludeFocus(
-                child: Row(
-                  children: [
-                    UserWidget(
-                      avatarKey: _itemKeys[0],
-                      onTap: () {
-                        NavController.instance.focusHeaderItem(0);
-                        showUserSwitcher(context);
-                      },
-                    ),
-                    const Spacer(),
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+          child: Stack(
+            key: _stackKey,
+            clipBehavior: Clip.none,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: ExcludeFocus(
+                  child: Row(
+                    children: [
+                      UserWidget(
+                        avatarKey: _itemKeys[0],
+                        onTap: () {
+                          NavController.instance.focusHeaderItem(0);
+                          showUserSwitcher(context);
+                        },
+                      ),
+                      const Spacer(),
 
-                    IconButton(
-                      key: _itemKeys[1],
-                      onPressed: widget.onStoreTap,
-                      icon: const Icon(Icons.local_mall, size: 32),
-                      tooltip: "IFSCstation Store",
-                    ),
-                    IconButton(
-                      key: _itemKeys[2],
-                      onPressed: widget.onTrophiesTap,
-                      icon: const Icon(Icons.emoji_events, size: 32),
-                      tooltip: "Troféus",
-                    ),
-                    IconButton(
-                      key: _itemKeys[3],
-                      onPressed: widget.onSettingsTap,
-                      icon: const Icon(Icons.settings, size: 32),
-                      tooltip: "Configurações",
-                    ),
+                      IconButton(
+                        key: _itemKeys[1],
+                        onPressed: widget.onStoreTap,
+                        icon: const Icon(Icons.local_mall, size: 32),
+                        tooltip: "IFSCstation Store",
+                      ),
+                      IconButton(
+                        key: _itemKeys[2],
+                        onPressed: widget.onTrophiesTap,
+                        icon: const Icon(Icons.emoji_events, size: 32),
+                        tooltip: "Troféus",
+                      ),
+                      IconButton(
+                        key: _itemKeys[3],
+                        onPressed: widget.onSettingsTap,
+                        icon: const Icon(Icons.settings, size: 32),
+                        tooltip: "Configurações",
+                      ),
 
-                    const Spacer(),
-                    const Padding(
-                      padding: EdgeInsets.only(right: 12),
-                      child: GamepadIndicator(),
-                    ),
-                    const Clock(),
-                  ],
+                      const Spacer(),
+                      const Padding(
+                        padding: EdgeInsets.only(right: 12),
+                        child: GamepadIndicator(),
+                      ),
+                      const Clock(),
+                    ],
+                  ),
                 ),
               ),
-            ),
-            _buildIndicator(),
-          ],
-        ),
+              _buildIndicator(),
+              _buildFocusTooltip(),
+            ],
+          ),
         ),
       ),
     );

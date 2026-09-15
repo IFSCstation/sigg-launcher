@@ -96,12 +96,16 @@ void main() {
 
   Future<void> expectNoLaunch(WidgetTester tester) async {
     await stall(tester);
-    expect(await isGameProcessRunning(tester), isFalse,
-        reason: 'a game process was started unexpectedly');
+    expect(
+      await isGameProcessRunning(tester),
+      isFalse,
+      reason: 'a game process was started unexpectedly',
+    );
   }
 
-  testWidgets('Enter in the games zone still launches the selected game',
-      (tester) async {
+  testWidgets('Enter in the games zone still launches the selected game', (
+    tester,
+  ) async {
     await pumpLibrary(tester);
     expect(NavController.instance.isGamesActive, isTrue);
 
@@ -112,39 +116,53 @@ void main() {
     await pressKey(tester, LogicalKeyboardKey.enter);
     await stall(tester);
 
-    expect(await isGameProcessRunning(tester), isTrue,
-        reason: 'sanity: pressing Enter on a game cover must launch a game');
+    expect(
+      await isGameProcessRunning(tester),
+      isTrue,
+      reason: 'sanity: pressing Enter on a game cover must launch a game',
+    );
     await killGameProcessesInTest(tester);
   });
 
   testWidgets(
-      'clicking a header icon and later pressing Enter must NOT launch a game',
-      (tester) async {
-    await pumpLibrary(tester);
-    expect(NavController.instance.isGamesActive, isTrue);
+    'clicking a header icon and later pressing Enter must NOT launch a game',
+    (tester) async {
+      await pumpLibrary(tester);
+      expect(NavController.instance.isGamesActive, isTrue);
 
-    await tester.tap(find.byIcon(Icons.local_mall));
-    await settle(tester);
+      await tester.tap(find.byIcon(Icons.local_mall));
+      await settle(tester);
 
-    expect(find.byType(StorePage), findsOneWidget,
-        reason: 'clicking the store icon must open the store page');
-    await expectNoLaunch(tester);
+      expect(
+        find.byType(StorePage),
+        findsOneWidget,
+        reason: 'clicking the store icon must open the store page',
+      );
+      await expectNoLaunch(tester);
 
-    await tester.pageBack();
-    await settle(tester);
+      await tester.pageBack();
+      await settle(tester);
 
-    expect(NavController.instance.isHeaderActive, isTrue,
-        reason: 'clicking the header icon must put the header zone in focus');
+      expect(
+        NavController.instance.isHeaderActive,
+        isTrue,
+        reason: 'clicking the header icon must put the header zone in focus',
+      );
 
-    await pressKey(tester, LogicalKeyboardKey.enter);
+      await pressKey(tester, LogicalKeyboardKey.enter);
 
-    expect(find.byType(StorePage), findsOneWidget,
-        reason: 'Enter after closing must re-open the store (header action)');
-    await expectNoLaunch(tester);
-  });
+      expect(
+        find.byType(StorePage),
+        findsOneWidget,
+        reason: 'Enter after closing must re-open the store (header action)',
+      );
+      await expectNoLaunch(tester);
+    },
+  );
 
-  testWidgets('navigating the header by keyboard then Enter opens the page',
-      (tester) async {
+  testWidgets('navigating the header by keyboard then Enter opens the page', (
+    tester,
+  ) async {
     await pumpLibrary(tester);
 
     await pressKey(tester, LogicalKeyboardKey.arrowUp);
@@ -154,8 +172,40 @@ void main() {
 
     await pressKey(tester, LogicalKeyboardKey.enter);
 
-    expect(find.byType(StorePage), findsOneWidget,
-        reason: 'Enter on the store icon must open the store page');
+    expect(
+      find.byType(StorePage),
+      findsOneWidget,
+      reason: 'Enter on the store icon must open the store page',
+    );
     await expectNoLaunch(tester);
+  });
+
+  testWidgets('focused header items reveal a tooltip for nav input', (
+    tester,
+  ) async {
+    await pumpLibrary(tester);
+
+    await pressKey(tester, LogicalKeyboardKey.arrowUp);
+    expect(
+      find.text('Perfil'),
+      findsOneWidget,
+      reason: 'entering the header zone must show the profile tooltip',
+    );
+
+    await pressKey(tester, LogicalKeyboardKey.arrowRight);
+    expect(find.text('IFSCstation Store'), findsOneWidget);
+
+    await pressKey(tester, LogicalKeyboardKey.arrowRight);
+    expect(find.text('Troféus'), findsOneWidget);
+
+    await pressKey(tester, LogicalKeyboardKey.arrowRight);
+    expect(find.text('Configurações'), findsOneWidget);
+
+    await pressKey(tester, LogicalKeyboardKey.arrowDown);
+    expect(
+      find.text('Configurações'),
+      findsNothing,
+      reason: 'leaving the header zone must hide the tooltip',
+    );
   });
 }
