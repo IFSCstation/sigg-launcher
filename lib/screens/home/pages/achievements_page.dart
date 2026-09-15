@@ -1,7 +1,6 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:sigg_launcher/app_controller.dart';
 import 'package:sigg_launcher/screens/home/pages/game_trophies_page.dart';
 import 'package:sigg_launcher/screens/home/widgets/mock_games.dart';
 import 'package:sigg_launcher/services/achievement_service.dart';
@@ -25,7 +24,6 @@ class _AchievementsPageState extends State<AchievementsPage> {
 
   Future<_TrophyIndex> _load() async {
     final games = await GameLoader(gamesFolder: kGamesFolder).load();
-    final username = AppController.instance.currentUser.nickname;
     final service = AchievementService();
 
     final entries = <_GameTrophyEntry>[];
@@ -33,7 +31,7 @@ class _AchievementsPageState extends State<AchievementsPage> {
       final id = game.id;
       if (id == null) continue;
       try {
-        final snapshot = await service.snapshot(id, username: username);
+        final snapshot = await service.snapshot(id);
         entries.add(_GameTrophyEntry(game: game, snapshot: snapshot));
       } on SocketException {
         throw const AchievementUnavailable();
