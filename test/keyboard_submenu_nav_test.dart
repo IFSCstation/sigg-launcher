@@ -5,6 +5,7 @@ import 'package:sigg_launcher/app_widget.dart';
 import 'package:sigg_launcher/screens/home/home.dart';
 import 'package:sigg_launcher/screens/home/pages/achievements_page.dart';
 import 'package:sigg_launcher/screens/home/pages/game_trophies_page.dart';
+import 'package:sigg_launcher/screens/home/pages/settings_page.dart';
 import 'package:sigg_launcher/screens/home/widgets/mock_games.dart';
 import 'package:sigg_launcher/services/achievement_service.dart';
 import 'package:sigg_launcher/services/bgm_player.dart';
@@ -128,6 +129,19 @@ void main() {
     expect(PageFocusHub.instance.active!.index, 0);
   }
 
+  Future<void> openSettings(WidgetTester tester) async {
+    // Header zone: Perfil(0) -> Store(1) -> Troféus(2) -> Settings(3).
+    await pressKey(tester, LogicalKeyboardKey.arrowUp);
+    for (var i = 0; i < 3; i++) {
+      await pressKey(tester, LogicalKeyboardKey.arrowRight);
+    }
+    await pressKey(tester, LogicalKeyboardKey.enter);
+    expect(find.byType(SettingsPage), findsOneWidget);
+    expect(PageFocusHub.instance.active, isNotNull);
+    expect(PageFocusHub.instance.active!.count, 5);
+    expect(PageFocusHub.instance.active!.index, 0);
+  }
+
   testWidgets('keyboard arrows move the trophies index and Enter opens the '
       'focused game', (tester) async {
     await pumpLibrary(tester);
@@ -149,6 +163,25 @@ void main() {
       'Alpha',
       reason: 'Enter must open the currently focused game',
     );
+  });
+
+  testWidgets('keyboard arrows navigate settings and Enter activates the '
+      'focused option', (tester) async {
+    await pumpLibrary(tester);
+    await openSettings(tester);
+
+    await pressKey(tester, LogicalKeyboardKey.arrowDown);
+    expect(PageFocusHub.instance.active!.index, 1);
+    await pressKey(tester, LogicalKeyboardKey.arrowDown);
+    expect(PageFocusHub.instance.active!.index, 2);
+    await pressKey(tester, LogicalKeyboardKey.arrowUp);
+    expect(PageFocusHub.instance.active!.index, 1);
+
+    await pressKey(tester, LogicalKeyboardKey.enter);
+    expect(find.text('Esta opção estará disponível em breve.'), findsOneWidget);
+
+    await pressKey(tester, LogicalKeyboardKey.escape);
+    expect(find.byType(SettingsPage), findsNothing);
   });
 
   testWidgets('keyboard moves through the trophy row, Enter is inert, and '
