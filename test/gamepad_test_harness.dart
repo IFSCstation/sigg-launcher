@@ -22,8 +22,10 @@ class FakeGamepadsPlatform extends GamepadsPlatformInterface {
   @override
   Stream<GamepadEvent> get gamepadEventsStream => events.stream;
 
-  void dispose() {
-    events.close();
+  @override
+  Future<void> dispose() async {
+    await events.close();
+    await super.dispose();
   }
 }
 

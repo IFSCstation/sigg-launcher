@@ -1,0 +1,63 @@
+{
+  "name": "IFSCstation Oficial",
+  "author": "Equipe IFSCstation",
+  "description": "Repositório de exemplo com jogos e apps gratuitos.",
+  "packages": [
+    {
+      "id": "stellar-drift",
+      "name": "Stellar Drift",
+      "tagline": "Corra pelo cosmos em alta velocidade. Edição completa com todos os pacotes e a trilha sonora original.",
+      "version": "1.4.0",
+      "section": "Jogos",
+      "icon": "rocket_launch",
+      "color": "#7C4DFF",
+      "featured": true
+    },
+    {
+      "id": "neon-racer",
+      "name": "Neon Racer",
+      "tagline": "Corridas de rua sob as luzes da cidade.",
+      "version": "2.1.0",
+      "section": "Jogos",
+      "icon": "directions_car",
+      "color": "#E91E63"
+    },
+    {
+      "id": "mystic-grove",
+      "name": "Mystic Grove",
+      "tagline": "Quebra-cabeças ancestrais numa floresta luminosa.",
+      "version": "1.0.2",
+      "section": "Jogos",
+      "icon": "forest",
+      "color": "#4CAF50"
+    },
+    {
+      "id": "cosmic-clash",
+      "name": "Cosmic Clash",
+      "tagline": "Lutas em arenas zero-G.",
+      "version": "3.0.0",
+      "section": "Jogos",
+      "icon": "bolt",
+      "color": "#F44336",
+      "badge": "NOVO"
+    },
+    {
+      "id": "gem-pack",
+      "name": "Gem Pack",
+      "tagline": "Pacote de gemas para todos os jogos.",
+      "version": "1.1.0",
+      "section": "DLCs e pacotes",
+      "icon": "diamond",
+      "color": "#00BCD4"
+    },
+    {
+      "id": "trilha-sonora",
+      "name": "Trilha sonora",
+      "tagline": "Banda original de Stellar Drift.",
+      "version": "1.0.0",
+      "section": "DLCs e pacotes",
+      "icon": "album",
+      "color": "#26A69A"
+    }
+  ]
+}
