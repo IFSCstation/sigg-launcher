@@ -96,7 +96,7 @@ class HeroBanner extends StatelessWidget {
                       game.title,
                       style: textTheme.displaySmall?.copyWith(
                         color: Colors.white,
-                        fontWeight: FontWeight.w900,
+                        fontWeight: FontWeight.w500,
                         letterSpacing: 0.5,
                         shadows: const [
                           Shadow(
@@ -144,7 +144,7 @@ class HeroBanner extends StatelessWidget {
                       vertical: 16,
                     ),
                     textStyle: textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w800,
+                      fontWeight: FontWeight.w400,
                     ),
                   ),
                 ),
