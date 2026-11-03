@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:gamepads/gamepads.dart';
 import 'package:sigg_launcher/screens/home/pages/achievements_page.dart';
+import 'package:sigg_launcher/screens/home/pages/library_page.dart';
 import 'package:sigg_launcher/screens/home/pages/settings_page.dart';
 import 'package:sigg_launcher/screens/home/pages/store_page.dart';
 import 'package:sigg_launcher/screens/home/widgets/games_row.dart';
@@ -72,7 +73,9 @@ class _LibraryState extends State<Library> {
           _gamesList = list;
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (mounted) {
-              NavController.instance.setGamesCount(list.length);
+              // +1 for the trailing "Ver todos" card, which is D-pad
+              // focusable so the full library is reachable without a mouse.
+              NavController.instance.setGamesCount(list.length + 1);
               if (list.isNotEmpty) _preloadAdjacent(list.first);
             }
           });
@@ -85,7 +88,9 @@ class _LibraryState extends State<Library> {
     _gamepadBridge = GamepadNavBridge(events: widget.gamepadEvents);
     GamepadStatus.instance.start();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) NavController.instance.setGamesCount(_gamesList.length);
+      if (mounted) {
+        NavController.instance.setGamesCount(_gamesList.length + 1);
+      }
     });
     _headerActive.value = NavController.instance.isHeaderActive;
     _headerIndex.value = NavController.instance.headerIndex;
@@ -214,9 +219,14 @@ class _LibraryState extends State<Library> {
     if (!mounted) return;
     if (NavController.instance.isHeaderActive) {
       _activateHeader(NavController.instance.headerIndex);
-    } else {
-      _activateGame(_selected.value);
+      return;
     }
+    // The trailing "Ver todos" card is the cell right after the last game.
+    if (NavController.instance.gamesIndex >= _gamesList.length) {
+      _openLibrary();
+      return;
+    }
+    _activateGame(_selected.value);
   }
 
   void _activateHeader(int index) {
@@ -228,10 +238,12 @@ class _LibraryState extends State<Library> {
         _openPage(const StorePage());
         break;
       case 2:
-        _openPage(AchievementsPage(
-          games: Future.value(_gamesList),
-          service: widget.achievementsService,
-        ));
+        _openPage(
+          AchievementsPage(
+            games: Future.value(_gamesList),
+            service: widget.achievementsService,
+          ),
+        );
         break;
       case 3:
         _openPage(const SettingsPage());
@@ -242,6 +254,10 @@ class _LibraryState extends State<Library> {
   void _activateGame(GameEntry? game) {
     if (game == null) return;
     GameLauncher.launch(context, game);
+  }
+
+  void _openLibrary() {
+    _openPage(LibraryPage(games: Future.value(_gamesList)));
   }
 
   List<GameEntry> _snapshotData() => _gamesList;
@@ -362,10 +378,12 @@ class _LibraryState extends State<Library> {
                                     },
                                     onTrophiesTap: () {
                                       NavController.instance.focusHeaderItem(2);
-                                      _openPage(AchievementsPage(
-              games: Future.value(_gamesList),
-              service: widget.achievementsService,
-            ));
+                                      _openPage(
+                                        AchievementsPage(
+                                          games: Future.value(_gamesList),
+                                          service: widget.achievementsService,
+                                        ),
+                                      );
                                     },
                                     onSettingsTap: () {
                                       NavController.instance.focusHeaderItem(3);
@@ -402,6 +420,15 @@ class _LibraryState extends State<Library> {
                                         focusIndex: _gamesIndex.value,
                                         scrollController: _gamesScroll,
                                         onGameTap: _selectGame,
+                                        onSeeAllTap: () {
+                                          // Park the home cursor on the card
+                                          // so Enter re-opens the library
+                                          // after coming back.
+                                          NavController.instance.focusGamesItem(
+                                            games.length,
+                                          );
+                                          _openLibrary();
+                                        },
                                       );
                                     },
                                   ),

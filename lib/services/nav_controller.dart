@@ -95,6 +95,18 @@ class NavController extends ChangeNotifier {
     if (changed) notifyListeners();
   }
 
+  /// Moves focus to the games zone and positions the selection on the given
+  /// cell (used when a cover / "Ver todos" card is clicked, so pressing Enter
+  /// afterwards re-activates that same item).
+  void focusGamesItem(int index) {
+    final max = _gamesCount > 0 ? _gamesCount - 1 : 0;
+    final clamped = index.clamp(0, max);
+    final changed = _section != HomeSection.games || _gamesIndex != clamped;
+    _section = HomeSection.games;
+    _gamesIndex = clamped;
+    if (changed) notifyListeners();
+  }
+
   void moveLeft() {
     switch (_section) {
       case HomeSection.header:

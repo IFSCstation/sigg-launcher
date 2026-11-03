@@ -18,6 +18,7 @@ class GamesRow extends StatefulWidget {
     this.focusIndex = 0,
     this.scrollController,
     this.onGameTap,
+    this.onSeeAllTap,
   });
 
   final List<GameEntry> games;
@@ -31,6 +32,9 @@ class GamesRow extends StatefulWidget {
 
   final ScrollController? scrollController;
   final ValueChanged<GameEntry>? onGameTap;
+
+  /// Opens the full library page from the trailing "Ver todos" card.
+  final VoidCallback? onSeeAllTap;
 
   @override
   State<GamesRow> createState() => _GamesRowState();
@@ -77,7 +81,8 @@ class _GamesRowState extends State<GamesRow> {
     final controller = _controller;
     if (!controller.hasClients) return;
     final index = widget.focusIndex;
-    if (index < 0 || index >= widget.games.length) return;
+    // The trailing "Ver todos" card is one extra focusable cell.
+    if (index < 0 || index > widget.games.length) return;
 
     final target =
         _leftPadding +
@@ -118,7 +123,13 @@ class _GamesRowState extends State<GamesRow> {
                 const SizedBox(width: _separatorWidth),
             itemBuilder: (context, index) {
               if (index == widget.games.length) {
-                return RepaintBoundary(child: _SeeAllCard(width: _coverWidth));
+                return RepaintBoundary(
+                  child: _SeeAllCard(
+                    width: _coverWidth,
+                    focused: widget.focusIndex == widget.games.length,
+                    onTap: widget.onSeeAllTap,
+                  ),
+                );
               }
               final game = widget.games[index];
               return RepaintBoundary(
@@ -282,66 +293,113 @@ class _GameCoverState extends State<GameCover> {
   }
 }
 
-class _SeeAllCard extends StatelessWidget {
-  const _SeeAllCard({required this.width});
+/// Trailing card that opens the full library page. It is one extra cell in
+/// the games row, so it gets the same hover/focus treatment as a game cover
+/// (D-pad focus mirrors hover).
+class _SeeAllCard extends StatefulWidget {
+  const _SeeAllCard({required this.width, this.focused = false, this.onTap});
 
   final double width;
+  final bool focused;
+  final VoidCallback? onTap;
+
+  @override
+  State<_SeeAllCard> createState() => _SeeAllCardState();
+}
+
+class _SeeAllCardState extends State<_SeeAllCard> {
+  bool _hovered = false;
 
   @override
   Widget build(BuildContext context) {
     final textTheme = Theme.of(context).textTheme;
     final colorScheme = Theme.of(context).colorScheme;
+    final active = _hovered || widget.focused;
 
-    return SizedBox(
-      width: width,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          AspectRatio(
-            aspectRatio: coverAspectRatio,
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(14),
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(14),
-                  color: colorScheme.surfaceContainerHighest,
-                  border: Border.all(
-                    color: colorScheme.outlineVariant,
-                    width: 2,
-                  ),
-                ),
-                child: Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        Icons.grid_view_rounded,
-                        size: 44,
-                        color: colorScheme.primary,
-                      ),
-                      const SizedBox(height: 10),
-                      Text(
-                        'Ver todos',
-                        style: textTheme.titleSmall?.copyWith(
-                          color: colorScheme.primary,
-                          fontWeight: FontWeight.w700,
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedScale(
+          scale: active ? 1.04 : 1.0,
+          duration: const Duration(milliseconds: 150),
+          curve: Curves.easeOut,
+          child: SizedBox(
+            width: widget.width,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                AspectRatio(
+                  aspectRatio: coverAspectRatio,
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 150),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(14),
+                      boxShadow: active
+                          ? [
+                              BoxShadow(
+                                color: colorScheme.primary.withValues(
+                                  alpha: 0.55,
+                                ),
+                                blurRadius: 24,
+                                spreadRadius: 3,
+                              ),
+                            ]
+                          : null,
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(14),
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(14),
+                          color: colorScheme.surfaceContainerHighest,
+                          border: Border.all(
+                            color: active
+                                ? colorScheme.primary
+                                : colorScheme.outlineVariant,
+                            width: active ? 3 : 2,
+                          ),
+                        ),
+                        child: Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.grid_view_rounded,
+                                size: 44,
+                                color: colorScheme.primary,
+                              ),
+                              const SizedBox(height: 10),
+                              Text(
+                                'Ver todos',
+                                style: textTheme.titleSmall?.copyWith(
+                                  color: colorScheme.primary,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
-                    ],
+                    ),
                   ),
                 ),
-              ),
+                const SizedBox(height: 8),
+                Text(
+                  'Ver todos',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
             ),
           ),
-          const SizedBox(height: 8),
-          Text(
-            'Ver todos',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
-          ),
-        ],
+        ),
       ),
     );
   }
