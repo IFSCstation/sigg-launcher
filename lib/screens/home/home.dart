@@ -120,6 +120,16 @@ class _LibraryState extends State<Library> {
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return false;
     }
+    // Directions intentionally repeat for list navigation; confirm and back
+    // are edge-triggered. Repeating Enter/Escape during a route transition can
+    // push the same submenu twice or pop through more than one page.
+    if (event is KeyRepeatEvent &&
+        (event.logicalKey == LogicalKeyboardKey.enter ||
+            event.logicalKey == LogicalKeyboardKey.numpadEnter ||
+            event.logicalKey == LogicalKeyboardKey.space ||
+            event.logicalKey == LogicalKeyboardKey.escape)) {
+      return true;
+    }
     // Only drive navigation while Home is the active route. The Launcher
     // keyboard listener stays alive under pushed submenus, so it owns the
     // keyboard back shortcut there (submenus have no back button; gamepad B is
@@ -295,6 +305,7 @@ class _LibraryState extends State<Library> {
   }
 
   void _openPage(Widget page) {
+    if (ModalRoute.of(context)?.isCurrent != true) return;
     Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
   }
 

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:sigg_launcher/app_widget.dart';
+import 'package:sigg_launcher/screens/home/pages/audio_settings_page.dart';
 import 'package:sigg_launcher/services/page_nav_controller.dart';
 
 class SettingsPage extends StatefulWidget {
@@ -11,6 +12,8 @@ class SettingsPage extends StatefulWidget {
 
 class _SettingsPageState extends State<SettingsPage> {
   final PageNavController _nav = PageNavController(axis: Axis.vertical);
+  bool _audioPageOpen = false;
+  bool _aboutDialogOpen = false;
   final List<GlobalKey> _itemKeys = List.generate(
     _settings.length,
     (_) => GlobalKey(),
@@ -55,6 +58,14 @@ class _SettingsPageState extends State<SettingsPage> {
 
   void _activateFocused() {
     if (_nav.index < 0 || _nav.index >= _settings.length) return;
+    if (_settings[_nav.index].title == 'About') {
+      _showAbout();
+      return;
+    }
+    if (_settings[_nav.index].title == 'Audio') {
+      _openAudioSettings();
+      return;
+    }
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(
@@ -63,6 +74,43 @@ class _SettingsPageState extends State<SettingsPage> {
           duration: Duration(seconds: 2),
         ),
       );
+  }
+
+  Future<void> _openAudioSettings() async {
+    // Ignore a second confirm/tap while the same destination is being pushed
+    // or is already above this route.
+    if (_audioPageOpen) return;
+    _audioPageOpen = true;
+    try {
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(builder: (_) => const AudioSettingsPage()),
+      );
+    } finally {
+      _audioPageOpen = false;
+    }
+  }
+
+  Future<void> _showAbout() async {
+    if (_aboutDialogOpen) return;
+    _aboutDialogOpen = true;
+    // Let the dialog's own keyboard-focusable actions (including Flutter's
+    // license list) receive input instead of routing it to the settings list.
+    PageFocusHub.instance.suspend();
+    try {
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AboutDialog(
+          applicationName: 'IFSCstation',
+          applicationVersion: '1.0.0+1',
+          applicationIcon: const Icon(Icons.videogame_asset, size: 48),
+          applicationLegalese: 'SIGG Launcher · Desenvolvido para o IFSC.',
+          children: const [Text('Launcher de jogos do laboratório IFSC.')],
+        ),
+      );
+    } finally {
+      PageFocusHub.instance.resume();
+      _aboutDialogOpen = false;
+    }
   }
 
   @override
@@ -135,16 +183,6 @@ class _SettingsPageState extends State<SettingsPage> {
 
 const _settings = <_SettingsEntry>[
   _SettingsEntry(
-    icon: Icons.person_outline,
-    title: 'Account',
-    subtitle: 'Profile, nickname and avatar',
-  ),
-  _SettingsEntry(
-    icon: Icons.notifications_outlined,
-    title: 'Notifications',
-    subtitle: 'Alerts, sounds and badges',
-  ),
-  _SettingsEntry(
     icon: Icons.palette_outlined,
     title: 'Appearance',
     subtitle: 'Theme and accent color',
@@ -153,6 +191,11 @@ const _settings = <_SettingsEntry>[
     icon: Icons.volume_up_outlined,
     title: 'Audio',
     subtitle: 'Music and sound effects',
+  ),
+  _SettingsEntry(
+    icon: Icons.language,
+    title: 'Language & Region',
+    subtitle: 'Display language and regional format',
   ),
   _SettingsEntry(
     icon: Icons.info_outline,

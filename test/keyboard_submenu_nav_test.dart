@@ -2,12 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sigg_launcher/app_widget.dart';
+import 'package:sigg_launcher/screens/home/pages/audio_settings_page.dart';
 import 'package:sigg_launcher/screens/home/home.dart';
 import 'package:sigg_launcher/screens/home/pages/achievements_page.dart';
 import 'package:sigg_launcher/screens/home/pages/game_trophies_page.dart';
 import 'package:sigg_launcher/screens/home/pages/settings_page.dart';
 import 'package:sigg_launcher/screens/home/widgets/mock_games.dart';
 import 'package:sigg_launcher/services/achievement_service.dart';
+import 'package:sigg_launcher/services/audio_preferences.dart';
 import 'package:sigg_launcher/services/bgm_player.dart';
 import 'package:sigg_launcher/services/game_run_state.dart';
 import 'package:sigg_launcher/services/gamepad_nav.dart';
@@ -76,6 +78,7 @@ const _testGames = <GameEntry>[
 void main() {
   setUp(() async {
     installFakeGamepads();
+    AudioPreferences.instance.debugReset();
     BgmPlayer.instance.debugDisable();
     UiSounds.instance.debugDisable();
     NavController.instance.debugReset();
@@ -138,8 +141,11 @@ void main() {
     await pressKey(tester, LogicalKeyboardKey.enter);
     expect(find.byType(SettingsPage), findsOneWidget);
     expect(PageFocusHub.instance.active, isNotNull);
-    expect(PageFocusHub.instance.active!.count, 5);
+    expect(PageFocusHub.instance.active!.count, 4);
     expect(PageFocusHub.instance.active!.index, 0);
+    expect(find.text('Account'), findsNothing);
+    expect(find.text('Notifications'), findsNothing);
+    expect(find.text('Language & Region'), findsOneWidget);
   }
 
   testWidgets('keyboard arrows move the trophies index and Enter opens the '
@@ -165,8 +171,9 @@ void main() {
     );
   });
 
-  testWidgets('keyboard arrows navigate settings and Enter activates the '
-      'focused option', (tester) async {
+  testWidgets('keyboard navigates settings and About shows app information', (
+    tester,
+  ) async {
     await pumpLibrary(tester);
     await openSettings(tester);
 
@@ -174,14 +181,101 @@ void main() {
     expect(PageFocusHub.instance.active!.index, 1);
     await pressKey(tester, LogicalKeyboardKey.arrowDown);
     expect(PageFocusHub.instance.active!.index, 2);
-    await pressKey(tester, LogicalKeyboardKey.arrowUp);
-    expect(PageFocusHub.instance.active!.index, 1);
+    await pressKey(tester, LogicalKeyboardKey.arrowDown);
+    expect(PageFocusHub.instance.active!.index, 3);
 
     await pressKey(tester, LogicalKeyboardKey.enter);
-    expect(find.text('Esta opção estará disponível em breve.'), findsOneWidget);
+    expect(find.text('IFSCstation'), findsOneWidget);
+    expect(find.text('1.0.0+1'), findsOneWidget);
+    expect(
+      PageFocusHub.instance.active,
+      isNull,
+      reason: 'the About dialog suspends page input routing',
+    );
+
+    await pressKey(tester, LogicalKeyboardKey.escape);
+    expect(find.text('IFSCstation'), findsNothing);
+    expect(PageFocusHub.instance.active, isNotNull);
 
     await pressKey(tester, LogicalKeyboardKey.escape);
     expect(find.byType(SettingsPage), findsNothing);
+  });
+
+  testWidgets('keyboard opens Audio and adjusts live music/UI sound settings', (
+    tester,
+  ) async {
+    await pumpLibrary(tester);
+    await openSettings(tester);
+
+    await pressKey(tester, LogicalKeyboardKey.arrowDown);
+    expect(PageFocusHub.instance.active!.index, 1);
+    await pressKey(tester, LogicalKeyboardKey.enter);
+    expect(find.byType(AudioSettingsPage), findsOneWidget);
+    expect(PageFocusHub.instance.active!.count, 4);
+
+    // Focus the music volume row and use Left to lower it by one percent.
+    await pressKey(tester, LogicalKeyboardKey.arrowDown);
+    expect(PageFocusHub.instance.active!.index, 1);
+    await pressKey(tester, LogicalKeyboardKey.arrowLeft);
+    expect(AudioPreferences.instance.musicVolume, 0.99);
+    expect(find.text('99%'), findsOneWidget);
+    await pressKey(tester, LogicalKeyboardKey.arrowRight);
+    expect(AudioPreferences.instance.musicVolume, 1.0);
+    expect(PageFocusHub.instance.active!.index, 1);
+    expect(AudioPreferences.instance.musicEnabled, isTrue);
+    await pressKey(tester, LogicalKeyboardKey.enter);
+    expect(
+      AudioPreferences.instance.musicEnabled,
+      isTrue,
+      reason: 'confirming a volume slider must not toggle music',
+    );
+
+    // Focus and toggle interface sounds with Enter.
+    await pressKey(tester, LogicalKeyboardKey.arrowDown);
+    expect(PageFocusHub.instance.active!.index, 2);
+    expect(AudioPreferences.instance.uiSoundsEnabled, isTrue);
+    await pressKey(tester, LogicalKeyboardKey.enter);
+    expect(AudioPreferences.instance.uiSoundsEnabled, isFalse);
+
+    await pressKey(tester, LogicalKeyboardKey.arrowDown);
+    expect(PageFocusHub.instance.active!.index, 3);
+    await pressKey(tester, LogicalKeyboardKey.enter);
+    expect(
+      AudioPreferences.instance.uiSoundsEnabled,
+      isFalse,
+      reason: 'confirming a volume slider must not toggle interface sounds',
+    );
+
+    await pressKey(tester, LogicalKeyboardKey.escape);
+    expect(find.byType(AudioSettingsPage), findsNothing);
+    expect(PageFocusHub.instance.active!.count, 4);
+    await pressKey(tester, LogicalKeyboardKey.escape);
+    expect(find.byType(SettingsPage), findsNothing);
+  });
+
+  testWidgets('holding confirm/back does not duplicate or skip the Audio '
+      'settings route', (tester) async {
+    await pumpLibrary(tester);
+    await openSettings(tester);
+    await pressKey(tester, LogicalKeyboardKey.arrowDown);
+    expect(PageFocusHub.instance.active!.index, 1);
+
+    // Repeat while the push is still being scheduled: this used to queue the
+    // same route a second time, making Back return to Audio again.
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+    await tester.sendKeyRepeatEvent(LogicalKeyboardKey.enter);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
+    await settle(tester);
+    expect(find.byType(AudioSettingsPage), findsOneWidget);
+
+    // Repeated Escape should pop only the current route, not skip through the
+    // settings page underneath it.
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.escape);
+    await tester.sendKeyRepeatEvent(LogicalKeyboardKey.escape);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.escape);
+    await settle(tester);
+    expect(find.byType(AudioSettingsPage), findsNothing);
+    expect(find.byType(SettingsPage), findsOneWidget);
   });
 
   testWidgets('keyboard moves through the trophy row, Enter is inert, and '

@@ -24,10 +24,14 @@ class UiSounds {
 
   static final UiSounds instance = UiSounds._();
 
-  static const double _volume = 1.0;
-
   AudioPlayer? _active;
   bool _unavailable = false;
+  bool _enabled = true;
+  double _volume = 1.0;
+
+  bool get enabled => _enabled;
+
+  double get volume => _volume;
 
   /// Silences the player (used by tests where no audio plugin exists). Mirrors
   /// the permanent latched state a first [MissingPluginException] triggers.
@@ -36,8 +40,28 @@ class UiSounds {
     _unavailable = true;
   }
 
+  void setEnabled(bool enabled) {
+    if (_enabled == enabled) return;
+    _enabled = enabled;
+    if (!enabled) {
+      _disposeSafely(_active);
+      _active = null;
+    }
+  }
+
+  Future<void> setVolume(double volume) async {
+    _volume = volume.clamp(0.0, 1.0).toDouble();
+    final player = _active;
+    if (player == null || _unavailable) return;
+    try {
+      await player.setVolume(_volume);
+    } catch (_) {
+      // Audio settings are best-effort; they must not interrupt navigation.
+    }
+  }
+
   Future<void> selectionChanged() async {
-    if (_unavailable) return;
+    if (_unavailable || !_enabled) return;
     try {
       // Retire a still-playing blip (usually already gone) before starting a
       // fresh one so a rapid repeat never overlaps itself.
