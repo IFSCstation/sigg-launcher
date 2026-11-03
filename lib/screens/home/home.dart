@@ -119,10 +119,11 @@ class _LibraryState extends State<Library> {
     // keyboard listener stays alive under pushed submenus, so it owns the
     // keyboard back shortcut there (submenus have no back button; gamepad B is
     // the primary way out and keyboard users get Escape). It also drives the
-    // D-pad-navigable submenus (trophies) with the same keys the gamepad
-    // bridge uses: arrows move the topmost page's focus, Enter/Space confirm,
-    // Escape backs out. Any other pushed page (store/settings/dialog) owns no
-    // focus controller, so arrows are inert there — exact gamepad parity.
+    // D-pad-navigable submenus (trophies, store, settings, profile switcher)
+    // with the same keys the gamepad bridge uses: arrows move the topmost
+    // page's focus, Enter/Space confirm, Escape backs out. Any other pushed
+    // page (dialogs) owns no focus controller, so arrows are inert there —
+    // exact gamepad parity.
     final route = ModalRoute.of(context);
     if (route == null || !route.isCurrent) {
       final page = PageFocusHub.instance.active;
