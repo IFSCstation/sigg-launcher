@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sigg_launcher/services/repository_service.dart';
+import 'package:sigg_launcher/services/software_category.dart';
 
 void main() {
   late Directory tempDir;
@@ -67,6 +68,43 @@ void main() {
       expect(second.id, 'sem-id'); // slugified from name
       expect(second.icon, Icons.widgets); // unknown/missing icon fallback
       expect(second.featured, isFalse);
+    });
+
+    test('parses url and category; defaults and validates each', () {
+      final path = writeRepo('url-category.json', validRepo(packages: [
+        {
+          'name': 'Com Tudo',
+          'url': 'https://repositorio.example/pkgs/com-tudo.siggpkg',
+          'category': 'app',
+        },
+        {'name': 'Padrões'},
+        {'name': 'Url Local', 'url': '/home/lab/pkgs/nao-http.siggpkg'},
+        {'name': 'Url Malformada', 'url': 'ht!tp://::'},
+      ]));
+
+      final repo = service().fetchSync(path);
+
+      final full = repo.packages[0];
+      expect(full.url, 'https://repositorio.example/pkgs/com-tudo.siggpkg');
+      expect(full.category, SoftwareCategory.app);
+
+      // Defaults: no url (browse-only) and game category.
+      final defaults = repo.packages[1];
+      expect(defaults.url, isNull);
+      expect(defaults.category, SoftwareCategory.game);
+
+      // Non-http(s) URLs are dropped rather than failing the index.
+      expect(repo.packages[2].url, isNull);
+      expect(repo.packages[3].url, isNull);
+      expect(repo.packages[3].category, SoftwareCategory.game);
+    });
+
+    test('rejects an explicit but unrecognized category', () {
+      final path = writeRepo('bad-category.json', validRepo(packages: [
+        {'name': 'Typo', 'category': 'jogo'},
+      ]));
+
+      expect(() => service().fetchSync(path), throwsA(isA<RepoException>()));
     });
 
     test('rejects malformed JSON and missing name', () {

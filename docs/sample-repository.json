@@ -9,8 +9,10 @@
       "tagline": "Corra pelo cosmos em alta velocidade. Edição completa com todos os pacotes e a trilha sonora original.",
       "version": "1.4.0",
       "section": "Jogos",
+      "category": "game",
       "icon": "rocket_launch",
       "color": "#7C4DFF",
+      "url": "https://repositorio.ifscstation.edu.br/pkgs/stellar-drift.siggpkg",
       "featured": true
     },
     {
@@ -19,8 +21,10 @@
       "tagline": "Corridas de rua sob as luzes da cidade.",
       "version": "2.1.0",
       "section": "Jogos",
+      "category": "game",
       "icon": "directions_car",
-      "color": "#E91E63"
+      "color": "#E91E63",
+      "url": "https://repositorio.ifscstation.edu.br/pkgs/neon-racer.siggpkg"
     },
     {
       "id": "mystic-grove",
@@ -28,8 +32,10 @@
       "tagline": "Quebra-cabeças ancestrais numa floresta luminosa.",
       "version": "1.0.2",
       "section": "Jogos",
+      "category": "game",
       "icon": "forest",
-      "color": "#4CAF50"
+      "color": "#4CAF50",
+      "url": "https://repositorio.ifscstation.edu.br/pkgs/mystic-grove.siggpkg"
     },
     {
       "id": "cosmic-clash",
@@ -37,9 +43,22 @@
       "tagline": "Lutas em arenas zero-G.",
       "version": "3.0.0",
       "section": "Jogos",
+      "category": "game",
       "icon": "bolt",
       "color": "#F44336",
-      "badge": "NOVO"
+      "badge": "NOVO",
+      "url": "https://repositorio.ifscstation.edu.br/pkgs/cosmic-clash.siggpkg"
+    },
+    {
+      "id": "calculadora-ifsc",
+      "name": "Calculadora IFSC",
+      "tagline": "Calculadora científica com histórico e conversões.",
+      "version": "1.1.0",
+      "section": "Apps",
+      "category": "app",
+      "icon": "code",
+      "color": "#2196F3",
+      "url": "https://repositorio.ifscstation.edu.br/pkgs/calculadora-ifsc.siggpkg"
     },
     {
       "id": "gem-pack",
@@ -48,7 +67,8 @@
       "version": "1.1.0",
       "section": "DLCs e pacotes",
       "icon": "diamond",
-      "color": "#00BCD4"
+      "color": "#00BCD4",
+      "url": "https://repositorio.ifscstation.edu.br/pkgs/gem-pack.siggpkg"
     },
     {
       "id": "trilha-sonora",
@@ -57,7 +77,8 @@
       "version": "1.0.0",
       "section": "DLCs e pacotes",
       "icon": "album",
-      "color": "#26A69A"
+      "color": "#26A69A",
+      "url": "https://repositorio.ifscstation.edu.br/pkgs/trilha-sonora.siggpkg"
     }
   ]
 }

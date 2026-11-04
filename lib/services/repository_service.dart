@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:sigg_launcher/services/software_category.dart';
 
 /// Manifest listing every repository source the store knows about
 /// (Cydia/Sileo "sources" model). Override with `--dart-define=REPOS_FILE=`.
@@ -45,6 +46,8 @@ class RepoPackage {
     this.description,
     this.version,
     this.badge,
+    this.url,
+    this.category = SoftwareCategory.game,
     this.featured = false,
   });
 
@@ -67,6 +70,14 @@ class RepoPackage {
 
   /// Overlay pill on the cover ("NOVO", ...).
   final String? badge;
+
+  /// http(s) URL of the `.siggpkg` payload. Null (missing or not http(s))
+  /// means browse-only: the store shows the package but offers no install.
+  final String? url;
+
+  /// App/Game kind — decides which registry subfolder an install lands in
+  /// (`~/software/games` vs `~/software/apps`).
+  final SoftwareCategory category;
 
   /// Highlighted items lead the store as the featured banner.
   final bool featured;
@@ -307,9 +318,38 @@ class RepositoryService {
       icon: _iconFor(p['icon']),
       color: _colorFor(p['color'], id),
       badge: p['badge'] is String ? p['badge'] as String : null,
+      url: _httpUrlOrNull(p['url']),
+      category: _categoryFor(p['category'], id),
       featured: p['featured'] == true,
       repoName: repoName,
     );
+  }
+
+  /// Only http(s) URLs are install sources; a missing, empty, or non-http(s)
+  /// value yields null so the package stays browse-only instead of failing
+  /// the whole index.
+  String? _httpUrlOrNull(Object? value) {
+    if (value is! String) return null;
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return null;
+    final uri = Uri.tryParse(trimmed);
+    if (uri == null || !uri.hasAuthority) return null;
+    return (uri.scheme == 'http' || uri.scheme == 'https') ? trimmed : null;
+  }
+
+  /// Defaults to [SoftwareCategory.game]; an explicit but unrecognized value
+  /// is a hard error so typos ("jogo") don't silently mis-file packages.
+  SoftwareCategory _categoryFor(Object? value, String id) {
+    if (value == null) return SoftwareCategory.game;
+    if (value is String && value.trim().isEmpty) return SoftwareCategory.game;
+    final parsed = value is String ? SoftwareCategory.fromName(value) : null;
+    if (parsed == null) {
+      throw RepoException(
+        'JSON inválido: "category" inválido no pacote "$id" '
+        '(use "game" ou "app").',
+      );
+    }
+    return parsed;
   }
 
   IconData _iconFor(Object? value) =>
