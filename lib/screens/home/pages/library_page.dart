@@ -7,13 +7,16 @@ import 'package:sigg_launcher/screens/home/widgets/mock_games.dart';
 import 'package:sigg_launcher/services/game_launcher.dart';
 import 'package:sigg_launcher/services/game_loader.dart';
 import 'package:sigg_launcher/services/page_nav_controller.dart';
+import 'package:sigg_launcher/services/software_category.dart';
+import 'package:sigg_launcher/services/software_registry.dart';
 
 /// Full game library reached from the "Ver todos" card on Home. Shows every
 /// game in the registry as a grid of covers (same cover treatment as the home
 /// row) and launches the focused one. Follows the submenu conventions: dark
 /// background, transparent header, no back button (B / Escape leaves the
 /// page). D-pad/keyboard input goes through a [GridPageNavController] pushed
-/// onto [PageFocusHub].
+/// onto [PageFocusHub]: row 0 is the "Todos/Jogos/Apps" category filter,
+/// rows 1..n are the cover grid.
 class LibraryPage extends StatefulWidget {
   const LibraryPage({super.key, this.games, this.onLaunch});
 
@@ -32,22 +35,33 @@ class LibraryPage extends StatefulWidget {
 const double _headerHeight = 96;
 const double _cardMinWidth = 150;
 const double _gridGap = 16;
-const EdgeInsets _gridPadding = EdgeInsets.fromLTRB(
-  16,
-  _headerHeight + 8,
-  16,
-  32,
-);
+
+/// Grid content padding (the header + chips row live outside the grid, in a
+/// Column above it).
+const EdgeInsets _gridPadding = EdgeInsets.fromLTRB(16, 8, 16, 32);
 
 /// Room under each cover for the title + genre lines.
 const double _cardLabelHeight = 50;
 
 class _LibraryPageState extends State<LibraryPage> {
-  /// D-pad/keyboard grid: rows of covers, columns derived from the viewport.
+  /// D-pad/keyboard grid: row 0 = category chips ("Todos/Jogos/Apps"), rows
+  /// 1..n = rows of covers, columns derived from the viewport.
   final GridPageNavController _nav = GridPageNavController();
   final List<GlobalKey> _cellKeys = <GlobalKey>[];
 
+  /// Row 0 chips: label + the category they filter by (null = "Todos").
+  static const _filterOptions = <(String, SoftwareCategory?)>[
+    ('Todos', null),
+    ('Jogos', SoftwareCategory.game),
+    ('Apps', SoftwareCategory.app),
+  ];
+
   List<GameEntry> _games = const [];
+
+  /// Packages matching the active category filter — what the grid renders.
+  List<GameEntry> _visible = const [];
+  SoftwareCategory? _filter; // null = "Todos"
+
   List<int> _rows = const [];
   int _columns = 0;
   bool _loading = true;
@@ -59,11 +73,15 @@ class _LibraryPageState extends State<LibraryPage> {
     PageFocusHub.instance.push(_nav);
     _nav.onActivate = _activateFocused;
     _nav.addListener(_onNavChanged);
+    // A store install/uninstall re-scans the registry so the grid picks up
+    // new software without leaving the page.
+    SoftwareRegistry.instance.addListener(_onRegistryChanged);
     _load();
   }
 
   @override
   void dispose() {
+    SoftwareRegistry.instance.removeListener(_onRegistryChanged);
     PageFocusHub.instance.pop(_nav);
     _nav.removeListener(_onNavChanged);
     _nav.onActivate = null;
@@ -71,9 +89,13 @@ class _LibraryPageState extends State<LibraryPage> {
     super.dispose();
   }
 
+  void _onRegistryChanged() => _load();
+
   Future<void> _load() async {
     setState(() {
-      _loading = true;
+      // A registry refresh keeps the current grid up (no spinner flash);
+      // only the first load has nothing to show yet.
+      _loading = _games.isEmpty;
       _error = false;
     });
     try {
@@ -86,9 +108,7 @@ class _LibraryPageState extends State<LibraryPage> {
       setState(() {
         _loading = false;
         _games = games;
-        _cellKeys
-          ..clear()
-          ..addAll(List.generate(games.length, (_) => GlobalKey()));
+        _deriveVisible();
       });
       _syncNav();
     } catch (_) {
@@ -100,17 +120,51 @@ class _LibraryPageState extends State<LibraryPage> {
     }
   }
 
+  /// Recomputes which entries the active category filter shows and re-keys
+  /// the grid cells (fresh keys keep stale focused state off new entries).
+  void _deriveVisible() {
+    final filter = _filter;
+    _visible = filter == null
+        ? _games
+        : [for (final game in _games) if (game.category == filter) game];
+    _cellKeys
+      ..clear()
+      ..addAll(List.generate(_visible.length, (_) => GlobalKey()));
+  }
+
+  /// Filters the grid to [filter] (null = all categories). Re-derives the
+  /// nav rows so Up/Down can't walk into rows that no longer exist.
+  void _applyFilter(SoftwareCategory? filter) {
+    if (_filter == filter) return;
+    setState(() {
+      _filter = filter;
+      _deriveVisible();
+    });
+    _syncNav();
+  }
+
   /// Rebuilds the grid dimensions for the current column count. Empty while
-  /// loading/errored/empty so moves and activate become no-ops.
+  /// loading/errored/empty so moves and activate become no-ops; the chips
+  /// row stays navigable whenever the catalog itself has loaded, even when
+  /// the filter matches nothing (so the user can pick another category).
   void _syncNav() {
-    if (_loading || _error || _games.isEmpty || _columns <= 0) {
+    if (_loading || _error || _games.isEmpty) {
       _rows = const [];
       _nav.setRows(const []);
       return;
     }
+    if (_columns <= 0) {
+      // Not laid out yet: expose only the chips row so Enter works, then
+      // [_syncColumns] re-runs this with the full grid.
+      _rows = [_filterOptions.length];
+      _nav.setRows(_rows);
+      return;
+    }
     final rows = <int>[
-      for (var start = 0; start < _games.length; start += _columns)
-        math.min(_columns, _games.length - start),
+      _filterOptions.length, // Row 0: category chips.
+      if (_visible.isNotEmpty)
+        for (var start = 0; start < _visible.length; start += _columns)
+          math.min(_columns, _visible.length - start),
     ];
     _rows = rows;
     _nav.setRows(rows);
@@ -148,20 +202,27 @@ class _LibraryPageState extends State<LibraryPage> {
     });
   }
 
+  /// Grid-cell index for a nav position, or -1 for the chips row (row 0)
+  /// and out-of-range positions. [_rows] includes the chips row at index 0.
   int _indexFor(int row, int col) {
-    if (row < 0 || row >= _rows.length) return -1;
+    if (row < 1 || row >= _rows.length) return -1;
     if (col < 0 || col >= _rows[row]) return -1;
     var index = 0;
-    for (var i = 0; i < row; i++) {
+    for (var i = 1; i < row; i++) {
       index += _rows[i];
     }
     return index + col;
   }
 
   void _activateFocused() {
+    if (_nav.row == 0) {
+      final col = _nav.col.clamp(0, _filterOptions.length - 1);
+      _applyFilter(_filterOptions[col].$2);
+      return;
+    }
     final index = _indexFor(_nav.row, _nav.col);
-    if (index < 0 || index >= _games.length) return;
-    _launch(_games[index]);
+    if (index < 0 || index >= _visible.length) return;
+    _launch(_visible[index]);
   }
 
   void _launch(GameEntry game) {
@@ -198,6 +259,41 @@ class _LibraryPageState extends State<LibraryPage> {
     if (_error) return _LibraryUnavailable(onRetry: _load);
     if (_games.isEmpty) return const _EmptyLibrary();
 
+    // Header space (transparent AppBar overlays the body) + the category
+    // chips row (grid row 0 for the D-pad), then the cover grid.
+    return Column(
+      children: [
+        const SizedBox(height: _headerHeight),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+          child: Row(
+            children: [
+              for (var i = 0; i < _filterOptions.length; i++)
+                Padding(
+                  padding: const EdgeInsets.only(right: 10),
+                  child: _CategoryChip(
+                    label: _filterOptions[i].$1,
+                    selected: _filter == _filterOptions[i].$2,
+                    focused: _nav.row == 0 && _nav.col == i,
+                    onTap: () {
+                      _nav.focusCell(0, i);
+                      _applyFilter(_filterOptions[i].$2);
+                    },
+                  ),
+                ),
+            ],
+          ),
+        ),
+        Expanded(child: _buildGrid()),
+      ],
+    );
+  }
+
+  Widget _buildGrid() {
+    // A filter with no matches: keep the chips on screen (they live above
+    // this area) so the user can pick another category.
+    if (_visible.isEmpty) return const _EmptyCategory();
+
     return LayoutBuilder(
       builder: (context, constraints) {
         final columns = math.max(
@@ -222,20 +318,22 @@ class _LibraryPageState extends State<LibraryPage> {
             mainAxisSpacing: _gridGap,
             mainAxisExtent: cardHeight,
           ),
-          itemCount: _games.length,
+          itemCount: _visible.length,
           itemBuilder: (context, index) {
-            final game = _games[index];
+            final game = _visible[index];
+            // Row 0 of the nav grid is the chips row, so grid row = index
+            // row + 1.
+            final navRow = index ~/ columns + 1;
             return KeyedSubtree(
               key: _cellKeys[index],
               child: _LibraryGameCard(
                 game: game,
                 width: cardWidth,
-                focused:
-                    _nav.row == index ~/ columns && _nav.col == index % columns,
+                focused: _nav.row == navRow && _nav.col == index % columns,
                 // Tap keeps the home-row behavior (select) and launches the
                 // game, while moving the D-pad cursor to the tapped card.
                 onTap: () {
-                  _nav.focusCell(index ~/ columns, index % columns);
+                  _nav.focusCell(navRow, index % columns);
                   _launch(game);
                 },
               ),
@@ -470,6 +568,117 @@ class _LibraryUnavailable extends StatelessWidget {
             onPressed: onRetry,
             icon: const Icon(Icons.refresh),
             label: const Text('Tentar novamente'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Rounded filter chip for the "Todos | Jogos | Apps" row (grid row 0).
+/// [selected] shows the active category; [focused] mirrors hover so D-pad
+/// selection reads the same as mouse hover (same contract as the cards).
+class _CategoryChip extends StatefulWidget {
+  const _CategoryChip({
+    required this.label,
+    required this.selected,
+    required this.focused,
+    this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final bool focused;
+  final VoidCallback? onTap;
+
+  @override
+  State<_CategoryChip> createState() => _CategoryChipState();
+}
+
+class _CategoryChipState extends State<_CategoryChip> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final active = _hovered || widget.focused;
+    final textTheme = Theme.of(context).textTheme;
+
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedScale(
+          scale: active ? 1.05 : 1.0,
+          duration: const Duration(milliseconds: 150),
+          curve: Curves.easeOut,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(999),
+              color: Colors.white.withValues(
+                alpha: widget.selected ? 0.16 : 0.05,
+              ),
+              border: Border.all(
+                color: active
+                    ? Colors.white
+                    : Colors.white.withValues(alpha: 0.28),
+                width: active ? 2 : 1,
+              ),
+              boxShadow: active
+                  ? [
+                      BoxShadow(
+                        color: Colors.white.withValues(alpha: 0.22),
+                        blurRadius: 14,
+                      ),
+                    ]
+                  : null,
+            ),
+            child: Text(
+              widget.label,
+              style: textTheme.titleSmall?.copyWith(
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.3,
+                color: widget.selected
+                    ? Colors.white
+                    : Colors.white.withValues(alpha: 0.65),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Shown when the category filter matches nothing: the chips row stays on
+/// screen (it lives above this area) so the D-pad user can pick another
+/// category.
+class _EmptyCategory extends StatelessWidget {
+  const _EmptyCategory();
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    final colorScheme = Theme.of(context).colorScheme;
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.filter_alt_off, size: 56, color: colorScheme.outline),
+          const SizedBox(height: 16),
+          Text(
+            'Nenhum item nesta categoria.',
+            style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Escolha outra categoria acima.',
+            style: textTheme.bodySmall?.copyWith(
+              color: colorScheme.onSurfaceVariant,
+            ),
           ),
         ],
       ),

@@ -7,6 +7,7 @@ import 'package:sigg_launcher/services/game_loader.dart';
 import 'package:sigg_launcher/services/game_run_state.dart';
 import 'package:sigg_launcher/services/repository_service.dart';
 import 'package:sigg_launcher/services/software_category.dart';
+import 'package:sigg_launcher/services/software_registry.dart';
 
 /// Install phases reported to the UI (labels are pt-BR).
 enum InstallPhase { downloading, extracting, finalizing }
@@ -188,6 +189,11 @@ class PackageInstaller {
       final targetDir = Directory(target);
       if (targetDir.existsSync()) targetDir.deleteSync(recursive: true);
       Directory('${staging.path}/$gameId').renameSync(target);
+      // `unchanged` touched nothing, so only real mutations notify listeners
+      // (home/library re-scan the registry).
+      if (outcome != InstallOutcome.unchanged) {
+        SoftwareRegistry.instance.notifyChanged();
+      }
       return outcome;
     } on InstallCancelled {
       rethrow;
@@ -229,6 +235,7 @@ class PackageInstaller {
     final path = installedPath(id);
     if (path == null) return false;
     Directory(path).deleteSync(recursive: true);
+    SoftwareRegistry.instance.notifyChanged();
     return true;
   }
 

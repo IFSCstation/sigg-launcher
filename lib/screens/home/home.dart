@@ -22,6 +22,7 @@ import 'package:sigg_launcher/services/gamepad_nav.dart';
 import 'package:sigg_launcher/services/image_cache.dart';
 import 'package:sigg_launcher/services/nav_controller.dart';
 import 'package:sigg_launcher/services/page_nav_controller.dart';
+import 'package:sigg_launcher/services/software_registry.dart';
 
 const double _gamesSectionMinHeight = 240;
 
@@ -52,7 +53,7 @@ class Library extends StatefulWidget {
 }
 
 class _LibraryState extends State<Library> {
-  late final Future<List<GameEntry>> _games;
+  late Future<List<GameEntry>> _games;
   late final GamepadNavBridge _gamepadBridge;
   List<GameEntry> _gamesList = const [];
   final ValueNotifier<GameEntry?> _selected = ValueNotifier<GameEntry?>(null);
@@ -68,25 +69,12 @@ class _LibraryState extends State<Library> {
   @override
   void initState() {
     super.initState();
-    _games = (widget.games ??
-            GameLoader(
-              gamesFolder: kGamesFolder,
-              appsFolder: kAppsFolder,
-            ).load())
-        .then((list) {
-          _gamesList = list;
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) {
-              // +1 for the trailing "Ver todos" card, which is D-pad
-              // focusable so the full library is reachable without a mouse.
-              NavController.instance.setGamesCount(list.length + 1);
-              if (list.isNotEmpty) _preloadAdjacent(list.first);
-            }
-          });
-          return list;
-        });
+    _loadGames();
     NavController.instance.addListener(_onNavChanged);
     GameRunState.instance.addListener(_onRunStateChanged);
+    // Installs/uninstalls in the store re-scan the registry so new software
+    // shows up in the home row without a restart.
+    SoftwareRegistry.instance.addListener(_onRegistryChanged);
     HardwareKeyboard.instance.addHandler(_onKeyEvent);
     NavController.instance.onActivate = _onActivate;
     _gamepadBridge = GamepadNavBridge(events: widget.gamepadEvents);
@@ -104,6 +92,7 @@ class _LibraryState extends State<Library> {
   void dispose() {
     NavController.instance.removeListener(_onNavChanged);
     GameRunState.instance.removeListener(_onRunStateChanged);
+    SoftwareRegistry.instance.removeListener(_onRegistryChanged);
     HardwareKeyboard.instance.removeHandler(_onKeyEvent);
     if (NavController.instance.onActivate == _onActivate) {
       NavController.instance.onActivate = null;
@@ -118,6 +107,66 @@ class _LibraryState extends State<Library> {
     _headerIndex.dispose();
     _gamesScroll.dispose();
     super.dispose();
+  }
+
+  /// (Re)reads the game list. First run happens in [initState]; later runs
+  /// come from [_onRegistryChanged] after a store install/uninstall. Swaps
+  /// the future so the existing `FutureBuilder` re-runs with the fresh list.
+  void _loadGames() {
+    _games = (widget.games ??
+            GameLoader(
+              gamesFolder: kGamesFolder,
+              appsFolder: kAppsFolder,
+            ).load())
+        .then((list) {
+          _gamesList = list;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) {
+              // +1 for the trailing "Ver todos" card, which is D-pad
+              // focusable so the full library is reachable without a mouse.
+              NavController.instance.setGamesCount(list.length + 1);
+              if (list.isNotEmpty) _preloadAdjacent(list.first);
+              _resyncSelection(list);
+            }
+          });
+          return list;
+        });
+    setState(() {});
+  }
+
+  /// The registry changed (install/uninstall): re-scan so the home row and
+  /// hero pick up the new software without an app restart.
+  void _onRegistryChanged() {
+    if (!mounted) return;
+    _loadGames();
+  }
+
+  /// After a reload the selected entry is a stale object (fresh scan) or is
+  /// gone entirely (uninstalled): re-point it so the hero never shows a
+  /// removed game. BGM is only touched when the selection really changed —
+  /// a plain reload rebuilds instances but keeps the same game, and the
+  /// initial load has no selection yet (BGM starts on the first move, not
+  /// on startup).
+  void _resyncSelection(List<GameEntry> list) {
+    final previous = _selected.value;
+    if (previous == null) return; // Initial load: hero falls back to first.
+    if (list.isEmpty) {
+      _selected.value = null;
+      BgmPlayer.instance.stop();
+      return;
+    }
+    final index = NavController.instance.gamesIndex.clamp(0, list.length - 1);
+    final next = list[index];
+    if (identical(previous, next)) return;
+    _selected.value = next;
+    if (previous.id != next.id) {
+      final bgm = next.bgmPath;
+      if (bgm != null) {
+        BgmPlayer.instance.play(bgm);
+      } else {
+        BgmPlayer.instance.stop();
+      }
+    }
   }
 
   bool _onKeyEvent(KeyEvent event) {
@@ -320,8 +369,11 @@ class _LibraryState extends State<Library> {
         child: FutureBuilder<List<GameEntry>>(
           future: _games,
           builder: (context, snapshot) {
-            final games = snapshot.data ?? mockGames;
-            if (snapshot.connectionState != ConnectionState.done) {
+            // On a registry-triggered reload the previous list keeps showing
+            // (no spinner flash); the initial load has nothing cached yet.
+            final games = snapshot.data ?? _gamesList;
+            if (snapshot.connectionState != ConnectionState.done &&
+                games.isEmpty) {
               return const Center(child: CircularProgressIndicator());
             }
             if (games.isEmpty) {
