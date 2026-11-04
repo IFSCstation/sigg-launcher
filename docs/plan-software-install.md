@@ -1,6 +1,6 @@
 # Plan: Software install/uninstall + App/Game categories
 
-Status: steps 1–2 in progress; 3–9 pending.
+Status: steps 1–8 done; step 9 lists deferred follow-ups (other repos / future work).
 
 ## 1. Registry restructure — `lib/services/game_loader.dart`
 - `kSoftwareFolder` = `--dart-define=SOFTWARE_FOLDER` or `$HOME/software`; derive `kGamesFolder = $SOFTWARE/games` and `kAppsFolder = $SOFTWARE/apps` (replaces `GAMES_FOLDER`).
