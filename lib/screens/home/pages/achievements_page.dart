@@ -13,7 +13,7 @@ class AchievementsPage extends StatefulWidget {
   const AchievementsPage({super.key, this.games, this.service});
 
   /// Pre-computed game list (injected by Home for tests/consistency); when
-  /// null the page loads from the [kGamesFolder] registry itself.
+  /// null the page loads from the [kSoftwareFolder] registry itself.
   final Future<List<GameEntry>>? games;
 
   /// Test seam: the achievement daemon client. Defaults to the real one.
@@ -75,8 +75,11 @@ class _AchievementsPageState extends State<AchievementsPage> {
   }
 
   Future<List<_GameTrophyEntry>> _fetch() async {
-    final games =
-        await (widget.games ?? GameLoader(gamesFolder: kGamesFolder).load());
+    final games = await (widget.games ??
+        GameLoader(
+          gamesFolder: kGamesFolder,
+          appsFolder: kAppsFolder,
+        ).load());
     final service = widget.service ?? AchievementService();
 
     final entries = <_GameTrophyEntry>[];

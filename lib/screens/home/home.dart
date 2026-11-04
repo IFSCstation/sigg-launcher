@@ -35,7 +35,7 @@ class Library extends StatefulWidget {
 
   /// Pre-computed game list. Used by tests to inject a future resolved
   /// outside of Flutter's fake-async test zone; when null the screen loads
-  /// games from the [kGamesFolder] itself.
+  /// software from the [kSoftwareFolder] registry (games + apps).
   final Future<List<GameEntry>>? games;
 
   /// Gamepad event source. Used by tests to drive navigation with synthetic
@@ -68,7 +68,11 @@ class _LibraryState extends State<Library> {
   @override
   void initState() {
     super.initState();
-    _games = (widget.games ?? GameLoader(gamesFolder: kGamesFolder).load())
+    _games = (widget.games ??
+            GameLoader(
+              gamesFolder: kGamesFolder,
+              appsFolder: kAppsFolder,
+            ).load())
         .then((list) {
           _gamesList = list;
           WidgetsBinding.instance.addPostFrameCallback((_) {

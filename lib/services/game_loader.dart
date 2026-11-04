@@ -3,13 +3,24 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:sigg_launcher/screens/home/widgets/mock_games.dart';
+import 'package:sigg_launcher/services/software_category.dart';
 
-String get kGamesFolder {
-  const override = String.fromEnvironment('GAMES_FOLDER');
+/// Parent software registry root. Override with
+/// `--dart-define=SOFTWARE_FOLDER=...`. Contains the two typed subfolders
+/// [kGamesFolder] and [kAppsFolder].
+String get kSoftwareFolder {
+  const override = String.fromEnvironment('SOFTWARE_FOLDER');
   if (override.isNotEmpty) return override;
   final home = Platform.environment['HOME'];
-  return home == null ? 'games' : '$home/games';
+  return home == null ? 'software' : '$home/software';
 }
+
+/// Games subfolder: `~/software/games/<GameID>/` (the registry achievementd
+/// reads). Migrated manually from the old `~/games` layout.
+String get kGamesFolder => '$kSoftwareFolder/games';
+
+/// Apps subfolder: `~/software/apps/<AppID>/` (same typed layout as games).
+String get kAppsFolder => '$kSoftwareFolder/apps';
 
 const _loadPalette = <Color>[
   Color(0xFF7C4DFF),
@@ -27,15 +38,34 @@ const _staticExtensions = <String>['png', 'jpg', 'jpeg'];
 const _soundExtensions = <String>['ogg', 'mp3', 'wav', 'm4a'];
 
 class GameLoader {
-  const GameLoader({required this.gamesFolder});
+  const GameLoader({required this.gamesFolder, required this.appsFolder});
 
+  /// `~/software/games` — the game registry (also read by achievementd).
   final String gamesFolder;
 
-  Future<List<GameEntry>> load({List<GameEntry> fallback = mockGames}) async {
-    final root = Directory(gamesFolder);
-    if (!await root.exists()) return List.of(fallback);
+  /// `~/software/apps` — the app registry (same typed layout).
+  final String appsFolder;
 
+  /// Scans both registry subfolders; the subfolder a package lives in is what
+  /// marks it as [SoftwareCategory.game] or [SoftwareCategory.app].
+  Future<List<GameEntry>> load({List<GameEntry> fallback = mockGames}) async {
     final games = <GameEntry>[];
+    await _scan(Directory(gamesFolder), SoftwareCategory.game, games);
+    await _scan(Directory(appsFolder), SoftwareCategory.app, games);
+
+    games.sort(
+      (a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()),
+    );
+    return games.isEmpty ? List.of(fallback) : games;
+  }
+
+  Future<void> _scan(
+    Directory root,
+    SoftwareCategory category,
+    List<GameEntry> out,
+  ) async {
+    if (!await root.exists()) return;
+
     await for (final entity in root.list(followLinks: false)) {
       if (entity is! Directory) continue;
       final id = entity.path.split(Platform.pathSeparator).last;
@@ -47,13 +77,10 @@ class GameLoader {
       final iconPath = _findImage(imagesDir, 'icon');
       if (heroPath == null || coverPath == null) continue;
 
-      games.add(_buildEntry(entity.path, id, heroPath, coverPath, iconPath));
+      out.add(
+        _buildEntry(entity.path, id, heroPath, coverPath, iconPath, category),
+      );
     }
-
-    games.sort(
-      (a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()),
-    );
-    return games.isEmpty ? List.of(fallback) : games;
   }
 
   bool _isSlug(String value) =>
@@ -87,6 +114,7 @@ class GameLoader {
     String heroPath,
     String coverPath,
     String? iconPath,
+    SoftwareCategory category,
   ) {
     final info = _readGameJson('$folderPath/metadata/game.json');
 
@@ -96,10 +124,11 @@ class GameLoader {
     return GameEntry(
       info['name'] ?? id,
       info['tagline'] ?? info['description'] ?? 'Pronto para jogar.',
-      info['genre'] ?? 'Jogo',
+      info['genre'] ?? category.singularLabel,
       Icons.sports_esports,
       _colorFor(id),
       id: id,
+      category: category,
       description: info['description'],
       heroPath: heroPath,
       coverPath: coverPath,

@@ -18,7 +18,7 @@ class LibraryPage extends StatefulWidget {
   const LibraryPage({super.key, this.games, this.onLaunch});
 
   /// Pre-computed game list (injected by Home for tests/consistency); when
-  /// null the page loads from the [kGamesFolder] registry itself.
+  /// null the page loads from the [kSoftwareFolder] registry itself.
   final Future<List<GameEntry>>? games;
 
   /// Test seam: replaces [GameLauncher.launch] so widget tests can assert the
@@ -77,8 +77,11 @@ class _LibraryPageState extends State<LibraryPage> {
       _error = false;
     });
     try {
-      final games =
-          await (widget.games ?? GameLoader(gamesFolder: kGamesFolder).load());
+      final games = await (widget.games ??
+          GameLoader(
+            gamesFolder: kGamesFolder,
+            appsFolder: kAppsFolder,
+          ).load());
       if (!mounted) return;
       setState(() {
         _loading = false;

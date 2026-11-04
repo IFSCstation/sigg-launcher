@@ -18,13 +18,14 @@ Guidance for agents and humans working on `sigg_launcher`, a Flutter (Linux/GTK)
 - `lib/screens/home/home.dart` — `Library` screen. No vertical scroll; single fixed 1280x720 viewport (GTK header bar shrinks the Flutter viewheight, so layout uses `LayoutBuilder`). Owns `_selected` game, nav wiring, BGM trigger.
 - Widgets (`lib/screens/home/widgets/`): `header.dart`, `hero_banner.dart`, `games_row.dart` (+ `GameCover`, "Ver todos" card), `user_switcher.dart`, `user_widget.dart`, `clock.dart`, mock data (`mock_games.dart`, `mock_users.dart`).
 - Sub-pages: `lib/screens/home/pages/` (library, store, trophies, settings, achievements, repositories).
-- Services (`lib/services/`): `game_loader.dart`, `achievement_service.dart`, `bgm_player.dart`, `game_launcher.dart`, `nav_controller.dart`, `gamepad_nav.dart`, `avatar_loader.dart`, `window_service.dart`, `perf_logger.dart`, `fps_counter.dart`, `repository_service.dart`.
+- Services (`lib/services/`): `game_loader.dart`, `achievement_service.dart`, `bgm_player.dart`, `game_launcher.dart`, `nav_controller.dart`, `gamepad_nav.dart`, `avatar_loader.dart`, `window_service.dart`, `perf_logger.dart`, `fps_counter.dart`, `repository_service.dart`, `software_category.dart`.
 
 ## Content model (runtime, not assets)
-- Games live in the centralized registry `~/games/<GameID>/` (`$HOME/games`), the same registry `achievementd` reads. Override the root via `--dart-define=GAMES_FOLDER=...`. `<GameID>` must match the slug rules `[a-z0-9-]+`.
-- Typed subfolder layout per game:
+- Software lives in the parent registry `~/software/` (`$HOME/software`), split into two typed subfolders: `~/software/games/<GameID>/` — the games registry `achievementd` reads — and `~/software/apps/<AppID>/` — apps with the same layout. Override the root via `--dart-define=SOFTWARE_FOLDER=...`. `<GameID>`/`<AppID>` must match the slug rules `[a-z0-9-]+`. The subfolder a package lives in is what marks it `SoftwareCategory.game` vs `.app`.
+- **Migration note**: the registry moved from the old flat `~/games/` layout; it is migrated manually (`mv ~/games ~/software/games`) — the launcher does NOT auto-migrate, and `achievementd` still defaults to `~/games` until its default is updated (pass `--games-dir ~/software/games` or set `SIGG_GAMES_DIR` meanwhile).
+- Typed subfolder layout per game/app:
   ```
-  ~/games/<GameID>/
+  ~/software/{games,apps}/<GameID>/
   ├── metadata/
   │   ├── game.json          # name, tagline, description, genre, executable
   │   └── achievements.toml  # trophy definitions (read by achievementd)
@@ -36,9 +37,9 @@ Guidance for agents and humans working on `sigg_launcher`, a Flutter (Linux/GTK)
   │   └── bgm.*              # optional: ogg/mp3/wav/m4a
   └── bin/                   # optional self-contained executables
   ```
-- `GameLoader` skips folders with a non-slug id or missing hero+cover; if no games load at all the UI falls back to `mockGames` and `defaultMockUsers` (in-code mock data).
+- `GameLoader` scans both `games/` and `apps/` subfolders, skips folders with a non-slug id or missing hero+cover, and tags each entry with its `SoftwareCategory`; if no software loads at all the UI falls back to `mockGames` and `defaultMockUsers` (in-code mock data).
 - `avatars/` folder: user profile images (`png`/`webp`/`jpg`/`jpeg`/`gif`), overridable via `--dart-define=AVATARS_FOLDER=...`. Avatars are assigned randomly to mock users at startup; fall back to colored icons if the folder is empty.
-- `~/games/<GameID>/*` image/content mirrors the `.siggpkg` payload spec in `station-achievementd/docs/package-spec.md`. The launcher does NOT ship its own `games/` folder — the registry at `~/games` is the single source of game assets.
+- `~/software/{games,apps}/<GameID>/*` image/content mirrors the `.siggpkg` payload spec in `station-achievementd/docs/package-spec.md`. The launcher does NOT ship its own game/app folders — the registry at `~/software` is the single source of software assets.
 
 ## Trophies & achievementd
 - `AchievementsPage`/`GameTrophiesPage` (lib/screens/home/pages/) fetch real trophy state from the `achievementd` daemon (not mocks). `lib/services/achievement_service.dart` speaks the daemon's JSON-lines IPC: `{"v":1,"method":"snapshot","params":{"game":<GameID>,"username":<nickname>}}` over the unix socket at `$XDG_RUNTIME_DIR/achievementd/achievementd.sock`.

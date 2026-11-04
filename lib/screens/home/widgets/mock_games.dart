@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:sigg_launcher/services/software_category.dart';
 
 class GameEntry {
   const GameEntry(
@@ -8,6 +9,7 @@ class GameEntry {
     this.icon,
     this.color, {
     this.id,
+    this.category = SoftwareCategory.game,
     this.description,
     this.imageUrl,
     this.imageAsset,
@@ -20,6 +22,9 @@ class GameEntry {
 
   /// Registry game id (slug), e.g. "half-life".
   final String? id;
+
+  /// Whether this entry came from `~/software/games` or `~/software/apps`.
+  final SoftwareCategory category;
 
   final String title;
   final String tagline;
