@@ -10,7 +10,7 @@ on:
       flutter-version:
         description: Flutter SDK tag to build with (stable; linux-arm64 engine artifacts are published for 3.47.x)
         required: false
-        default: '3.47.4'
+        default: '3.50.0'
       launcher-args:
         description: Runtime args baked into run.sh (e.g. "--fullscreen --fps-overlay"); empty means none
         required: false
