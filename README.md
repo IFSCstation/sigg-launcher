@@ -2,11 +2,12 @@
 
 SIGG is the main UI process of the IFSCstation platform.
 
-Features:
-    - User Profiles (WIP)
-    - Game Launching
-    - Gamepad Support
-    - Builtin Store (WIP)
-    - Trophies Support (WIP)
+## Features
 
-PS: WIP features will need external software to work.
+- User Profiles (WIP)
+- Game Launching
+- Gamepad Support
+- Builtin Store (WIP)
+- Trophies Support (WIP)
+
+> **Note:** WIP features will need external software to work.
