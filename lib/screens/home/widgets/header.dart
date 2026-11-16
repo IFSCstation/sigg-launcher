@@ -1,6 +1,6 @@
 import 'dart:math' as math;
 
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:sigg_launcher/screens/home/widgets/clock.dart';
 import 'package:sigg_launcher/screens/home/widgets/user_widget.dart';
 import 'package:sigg_launcher/screens/home/widgets/user_switcher.dart';

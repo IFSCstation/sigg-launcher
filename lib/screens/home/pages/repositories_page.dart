@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:sigg_launcher/app_widget.dart';
 import 'package:sigg_launcher/services/page_nav_controller.dart';
 import 'package:sigg_launcher/services/repository_service.dart';
