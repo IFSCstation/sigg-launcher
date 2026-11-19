@@ -476,17 +476,24 @@ class _LibraryState extends State<Library> {
                                     listenable: Listenable.merge([
                                       _gamesActive,
                                       _gamesIndex,
-                                      _selected,
                                     ]),
                                     builder: (context, _) {
                                       return GamesRow(
                                         games: games,
-                                        selected:
-                                            _selected.value ?? games.first,
                                         active: _gamesActive.value,
                                         focusIndex: _gamesIndex.value,
                                         scrollController: _gamesScroll,
-                                        onGameTap: _selectGame,
+                                        onGameTap: (game) {
+                                          // Taps move the D-pad cursor too, so
+                                          // the highlighted cover always
+                                          // matches the hero/BGM selection.
+                                          final index = games.indexOf(game);
+                                          if (index >= 0) {
+                                            NavController.instance
+                                                .focusGamesItem(index);
+                                          }
+                                          _selectGame(game);
+                                        },
                                         onSeeAllTap: () {
                                           // Park the home cursor on the card
                                           // so Enter re-opens the library

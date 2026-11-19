@@ -7,6 +7,7 @@ import 'package:gamepads/gamepads.dart';
 import 'package:sigg_launcher/app_widget.dart';
 import 'package:sigg_launcher/screens/home/home.dart';
 import 'package:sigg_launcher/screens/home/pages/library_page.dart';
+import 'package:sigg_launcher/screens/home/widgets/games_row.dart';
 import 'package:sigg_launcher/screens/home/widgets/mock_games.dart';
 import 'package:sigg_launcher/services/bgm_player.dart';
 import 'package:sigg_launcher/services/game_run_state.dart';
@@ -122,6 +123,67 @@ void main() {
 
     expect(find.byType(LibraryPage), findsOneWidget);
     expect(NavController.instance.gamesIndex, _testGames.length);
+  });
+
+  testWidgets('the cover highlight follows the cursor, so "Ver todos" does not '
+      'leave the last cover ringed', (tester) async {
+    await pumpHome(tester);
+
+    GameCover cover(String id) => tester.widget<GameCover>(
+      find.byWidgetPredicate(
+        (widget) => widget is GameCover && widget.game.id == id,
+      ),
+    );
+
+    expect(cover('alpha').selected, isTrue);
+    expect(cover('beta').selected, isFalse);
+
+    await _pressKey(tester, LogicalKeyboardKey.arrowRight);
+    expect(cover('alpha').selected, isFalse);
+    expect(cover('beta').selected, isTrue);
+
+    // Park the cursor on the trailing card: only it may glow.
+    await _pressKey(tester, LogicalKeyboardKey.arrowRight);
+    expect(NavController.instance.gamesIndex, _testGames.length);
+    expect(
+      cover('beta').selected,
+      isFalse,
+      reason: 'the "Ver todos" cell owns the highlight, not the last cover',
+    );
+
+    // Coming back restores the last cover's ring.
+    await _pressKey(tester, LogicalKeyboardKey.arrowLeft);
+    expect(cover('beta').selected, isTrue);
+  });
+
+  testWidgets('tapping a cover moves the home D-pad cursor to it', (
+    tester,
+  ) async {
+    await pumpHome(tester);
+    // First leave the cursor on "Ver todos" so the tap has to correct it.
+    await _pressKey(tester, LogicalKeyboardKey.arrowRight);
+    await _pressKey(tester, LogicalKeyboardKey.arrowRight);
+    expect(NavController.instance.gamesIndex, _testGames.length);
+
+    await tester.tap(
+      find.byWidgetPredicate(
+        (widget) => widget is GameCover && widget.game.id == 'alpha',
+      ),
+    );
+    await _settle(tester);
+
+    expect(NavController.instance.isGamesActive, isTrue);
+    expect(NavController.instance.gamesIndex, 0);
+    expect(
+      tester
+          .widget<GameCover>(
+            find.byWidgetPredicate(
+              (widget) => widget is GameCover && widget.game.id == 'alpha',
+            ),
+          )
+          .selected,
+      isTrue,
+    );
   });
 
   testWidgets('keyboard moves through the library grid and Enter launches '
