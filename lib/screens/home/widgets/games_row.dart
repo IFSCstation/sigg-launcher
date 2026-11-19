@@ -13,7 +13,6 @@ class GamesRow extends StatefulWidget {
   const GamesRow({
     super.key,
     required this.games,
-    this.selected,
     this.active = true,
     this.focusIndex = 0,
     this.scrollController,
@@ -22,12 +21,14 @@ class GamesRow extends StatefulWidget {
   });
 
   final List<GameEntry> games;
-  final GameEntry? selected;
 
   /// Whether the row is the active navigation zone.
   final bool active;
 
-  /// Cover index currently focused by the D-pad.
+  /// Cover index currently focused by the D-pad. [games].length addresses the
+  /// trailing "Ver todos" card, so exactly one cell is highlighted at a time
+  /// (the highlight is the cursor, not the hero selection: the hero keeps the
+  /// last game while the cursor sits on "Ver todos").
   final int focusIndex;
 
   final ScrollController? scrollController;
@@ -136,7 +137,7 @@ class _GamesRowState extends State<GamesRow> {
                 child: GameCover(
                   game: game,
                   width: _coverWidth,
-                  selected: identical(game, widget.selected),
+                  selected: widget.focusIndex == index,
                   onTap: () => widget.onGameTap?.call(game),
                 ),
               );
