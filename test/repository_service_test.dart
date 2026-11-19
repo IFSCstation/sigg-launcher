@@ -128,18 +128,21 @@ void main() {
     });
 
     test('addSource validates, dedupes and persists; removeSource prunes',
-        () {
+        () async {
       final repoPath = writeRepo('repo.json', validRepo());
       final svc = service();
 
-      svc.addSource(repoPath);
+      await svc.addSource(repoPath);
       expect(svc.listSources(), [repoPath]);
 
       // Duplicate rejected.
-      expect(() => svc.addSource(repoPath), throwsA(isA<RepoException>()));
+      await expectLater(
+        svc.addSource(repoPath),
+        throwsA(isA<RepoException>()),
+      );
       // Broken source rejected before persisting.
-      expect(
-        () => svc.addSource('${tempDir.path}/nope.json'),
+      await expectLater(
+        svc.addSource('${tempDir.path}/nope.json'),
         throwsA(isA<RepoException>()),
       );
       expect(svc.listSources(), [repoPath]);
@@ -151,6 +154,39 @@ void main() {
 
       svc.removeSource(repoPath);
       expect(svc.listSources(), isEmpty);
+    });
+
+    test('addSource accepts an http source and rejects a failing one',
+        () async {
+      // A real loopback server exercises the same HttpClient path the store
+      // uses (RepositoryService.fetch). Flutter's test binding installs a
+      // mock HttpOverrides, so clear it for this file.
+      HttpOverrides.global = null;
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      var status = 200;
+      server.listen((request) async {
+        request.response.statusCode = status;
+        request.response.headers.contentType = ContentType.json;
+        request.response.write(
+          status == 200 ? jsonEncode(validRepo()) : 'erro',
+        );
+        await request.response.close();
+      });
+
+      final svc = service();
+      final url = 'http://127.0.0.1:${server.port}/repo.json';
+      await svc.addSource(url);
+      expect(svc.listSources(), [url]);
+
+      // A non-200 index is rejected and not persisted.
+      status = 500;
+      final failing = 'http://127.0.0.1:${server.port}/fail.json';
+      await expectLater(
+        svc.addSource(failing),
+        throwsA(isA<RepoException>()),
+      );
+      expect(svc.listSources(), [url]);
     });
 
     test('loadAll skips broken sources and merges packages', () async {

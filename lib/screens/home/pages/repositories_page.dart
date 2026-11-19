@@ -578,7 +578,7 @@ class _AddRepoDialogState extends State<_AddRepoDialog> {
       _error = null;
     });
     try {
-      widget.service.addSource(source); // Validates before persisting.
+      await widget.service.addSource(source); // Validates before persisting.
       if (!mounted) return;
       Navigator.of(context).pop(true);
     } on RepoException catch (e) {

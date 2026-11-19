@@ -74,6 +74,7 @@ RepoPackage repoPackage({
   SoftwareCategory category = SoftwareCategory.game,
   bool featured = false,
   String section = 'Jogos',
+  String version = '1.4.0',
 }) => RepoPackage(
   id: id,
   name: name,
@@ -84,5 +85,5 @@ RepoPackage repoPackage({
   url: url,
   category: category,
   featured: featured,
-  version: '1.4.0',
+  version: version,
 );

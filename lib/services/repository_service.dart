@@ -188,12 +188,32 @@ class RepositoryService {
     ];
   }
 
-  void addSource(String source) {
+  /// Validates [source] before persisting it. Local paths are checked with
+  /// [fetchSync]; http(s) URLs are fetched through the real event loop (the
+  /// store's own catalog fetch path). Network failures are reported as
+  /// [RepoException] so the add dialog can show them.
+  Future<void> addSource(String source) async {
     final trimmed = source.trim();
     if (trimmed.isEmpty) {
       throw const RepoException('Informe um caminho ou URL.');
     }
-    fetchSync(trimmed); // Validate before persisting.
+    final uri = Uri.tryParse(trimmed);
+    final isHttp =
+        uri != null && (uri.scheme == 'http' || uri.scheme == 'https');
+    if (isHttp && !uri.hasAuthority) {
+      throw const RepoException('URL inválida.');
+    }
+    try {
+      if (isHttp) {
+        await fetch(trimmed); // Validate the remote index before persisting.
+      } else {
+        fetchSync(trimmed);
+      }
+    } on SocketException {
+      throw RepoException('Não foi possível conectar a $trimmed.');
+    } on HttpException catch (e) {
+      throw RepoException('Erro de rede ao acessar $trimmed: ${e.message}');
+    }
     final sources = listSources();
     if (sources.contains(trimmed)) {
       throw RepoException('Repositório já adicionado: $trimmed');

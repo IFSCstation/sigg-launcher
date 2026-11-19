@@ -304,6 +304,64 @@ void main() {
     );
   });
 
+  testWidgets('installed package with a newer catalog version offers '
+      'Atualizar and replaces the install', (tester) async {
+    final tempDir = Directory.systemTemp.createTempSync('sigg_store_update');
+    addTearDown(() => tempDir.deleteSync(recursive: true));
+    final softwareFolder = '${tempDir.path}/software';
+
+    // Seed an installed v1.0.0 (the catalog will advertise 2.0.0).
+    await PackageInstaller(
+      softwareFolder: softwareFolder,
+      downloader: fakeDownloader(buildSiggpkg(version: '1.0.0')),
+    ).install(repoPackage(version: '1.0.0'));
+
+    final installer = PackageInstaller(
+      softwareFolder: softwareFolder,
+      downloader: fakeDownloader(buildSiggpkg(version: '2.0.0')),
+    );
+    final packages = [
+      repoPackage(
+        name: 'Stellar Drift',
+        version: '2.0.0',
+        featured: true,
+      ),
+    ];
+
+    await tester.binding.setSurfaceSize(const Size(1280, 720));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: theme,
+        home: StorePage(
+          packages: Future.value(packages),
+          installer: installer,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    // Installed → Enter on the featured banner opens the detail dialog,
+    // which compares the catalog version with the installed one.
+    final grid = PageFocusHub.instance.active! as GridPageNavController;
+    grid.moveDown();
+    grid.activate();
+    await tester.pumpAndSettle();
+
+    expect(find.byType(AlertDialog), findsOneWidget);
+    expect(find.text('2.0.0'), findsOneWidget);
+    expect(find.text('1.0.0'), findsOneWidget);
+    expect(find.text('Atualizar'), findsOneWidget);
+
+    await tester.tap(find.text('Atualizar'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Stellar Drift atualizado.'), findsOneWidget);
+    expect(installer.installedVersion('stellar-drift'), '2.0.0');
+    expect(find.text('INSTALADO'), findsWidgets);
+  });
+
   testWidgets('the store controller pops from the hub when the page closes',
       (tester) async {
     await pumpStore(tester);
