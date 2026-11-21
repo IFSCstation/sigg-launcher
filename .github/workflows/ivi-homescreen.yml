@@ -1,4 +1,3 @@
-
 name: Build Linux ARM64 (ivi-homescreen)
 
 concurrency:
@@ -49,7 +48,10 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install build dependencies
+        shell: bash
         run: |
+          set -euo pipefail
+
           sudo apt-get update -y
 
           sudo apt-get install -y --no-install-recommends \
@@ -73,7 +75,10 @@ jobs:
             hwdata
 
       - name: Clone emb_cli and ivi-homescreen
+        shell: bash
         run: |
+          set -euo pipefail
+
           mkdir -p "$RUNNER_TEMP/embedded-build"
 
           git clone --depth 1 \
@@ -90,8 +95,10 @@ jobs:
           cp "$EMB_DIR/examples/cross/all-backends.emb.yaml" \
             "$IVI_DIR/rpi4-trixie.emb.yaml"
 
+          # Add the Raspberry Pi 4 Trixie target.
           python3 - "$IVI_DIR/rpi4-trixie.emb.yaml" <<'PY'
           import sys
+          import textwrap
           from pathlib import Path
 
           path = Path(sys.argv[1])
@@ -100,33 +107,46 @@ jobs:
           needle = "  backends:\n"
 
           if content.count(needle) != 1:
-              raise SystemExit("Could not locate cross.backends in manifest")
+              raise SystemExit(
+                  "Could not locate exactly one cross.backends section"
+              )
 
-          target = """  targets:
-            rpi4-trixie:
-              extends: rpi4-trixie
-              cpu_flags: [-mcpu=cortex-a72]
-              backends:
-                wayland-egl:
-                  BUILD_BACKEND_WAYLAND_EGL: 'ON'
-                  BUILD_BACKEND_WAYLAND_VULKAN: 'OFF'
-          """
+          target = textwrap.indent(
+              textwrap.dedent("""\
+              targets:
+                rpi4-trixie:
+                  extends: rpi4-trixie
+                  cpu_flags: [-mcpu=cortex-a72]
+                  backends:
+                    wayland-egl:
+                      BUILD_BACKEND_WAYLAND_EGL: 'ON'
+                      BUILD_BACKEND_WAYLAND_VULKAN: 'OFF'
+              """),
+              "  "
+          )
 
-          path.write_text(content.replace(needle, target + needle, 1))
+          updated = content.replace(needle, target + needle, 1)
+          path.write_text(updated)
+
+          print("Generated Raspberry Pi manifest:")
+          print(updated)
           PY
 
-          echo "Generated Raspberry Pi manifest:"
-          cat "$IVI_DIR/rpi4-trixie.emb.yaml"
-
       - name: Bootstrap emb_cli
+        shell: bash
         working-directory: ${{ runner.temp }}/embedded-build/emb_cli
         run: |
+          set -euo pipefail
+
           eval "$(./bootstrap.sh --shellenv)"
           emb --version
 
       - name: Prepare Flutter SDK
+        shell: bash
         working-directory: ${{ runner.temp }}/embedded-build/emb_cli
         run: |
+          set -euo pipefail
+
           eval "$(./bootstrap.sh --shellenv)"
 
           WORKSPACE="$RUNNER_TEMP/flutter-workspace"
@@ -137,9 +157,12 @@ jobs:
 
           test -f "$WORKSPACE/setup_env.sh"
 
-
       - name: Cross-build ivi-homescreen and Flutter application
+        shell: bash
+        working-directory: ${{ runner.temp }}/embedded-build/emb_cli
         run: |
+          set -euo pipefail
+
           eval "$(./bootstrap.sh --shellenv)"
 
           WORKSPACE="$RUNNER_TEMP/flutter-workspace"
@@ -150,16 +173,30 @@ jobs:
 
           flutter --version
 
-          # List targets declared in the cross manifest.
-          emb cross "$MANIFEST" --list-targets
+          echo "=== Available targets ==="
 
-          # Validate toolchain, sysroot and backend resolution.
+          TARGETS="$(emb cross "$MANIFEST" --list-targets)"
+          echo "$TARGETS"
+
+          if ! grep -Eq '^[[:space:]]*rpi4-trixie[[:space:]]' <<< "$TARGETS"; then
+            echo "::error::Target rpi4-trixie was not registered"
+            echo "Check the generated manifest and board configuration."
+            exit 1
+          fi
+
+          echo "=== Validate Raspberry Pi board profile ==="
+
+          emb doctor --target rpi4-trixie "$MANIFEST"
+
+          echo "=== Cross-build dry run ==="
+
           emb cross "$MANIFEST" \
             --target rpi4-trixie \
             --backend wayland-egl \
             --dry-run
 
-          # Build the embedder and Flutter application.
+          echo "=== Build embedder and Flutter application ==="
+
           emb -v cross "$MANIFEST" \
             --workspace "$WORKSPACE" \
             --target rpi4-trixie \
@@ -167,7 +204,6 @@ jobs:
             --app "$GITHUB_WORKSPACE" \
             --mode "$BUILD_MODE" \
             --build
-        working-directory: ${{ runner.temp }}/embedded-build/emb_cli
 
       - name: Package runnable bundle
         shell: bash
@@ -198,7 +234,7 @@ jobs:
           test -f "$RUNNABLE_DIR/lib/libihs_shared.so.1"
           test -d "$RUNNABLE_DIR/data/flutter_assets"
 
-          # Generate run.sh. Parse arguments safely and preserve spaces.
+          # Generate run.sh.
           export RUNNABLE_DIR
 
           python3 <<'PY'
@@ -214,6 +250,7 @@ jobs:
           """ % " ".join(shlex.quote(arg) for arg in args)
 
           path = os.path.join(directory, "run.sh")
+
           with open(path, "w", encoding="utf-8") as file:
               file.write(script)
 
@@ -231,10 +268,10 @@ jobs:
 
           sha256sum "$PACKAGE" > "$PACKAGE.sha256"
 
-          echo "Package contents:"
+          echo "=== Package contents ==="
           tar -tzf "$PACKAGE"
 
-          echo "Package size:"
+          echo "=== Package size ==="
           du -h "$PACKAGE"
 
       - name: Upload artifact
