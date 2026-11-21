@@ -1,3 +1,4 @@
+
 name: Build Linux ARM64 (ivi-homescreen)
 
 concurrency:
@@ -96,7 +97,7 @@ jobs:
           cp "$EMB_DIR/examples/cross/all-backends.emb.yaml" \
             "$IVI_DIR/rpi4-trixie.emb.yaml"
 
-          # Add the Raspberry Pi 4 Trixie target.
+          # Add the Raspberry Pi 4 Trixie target and gamepads plugin.
           python3 - "$IVI_DIR/rpi4-trixie.emb.yaml" <<'PY'
           import sys
           import textwrap
@@ -118,6 +119,16 @@ jobs:
                 rpi4-trixie:
                   extends: rpi4-trixie
                   cpu_flags: [-mcpu=cortex-a72]
+
+                  defines:
+                    DISABLE_PLUGINS: 'OFF'
+                    PLUGINS_DIR: '../ivi-homescreen-plugins/plugins'
+                    BUILD_PLUGIN_GAMEPADS_LINUX: 'ON'
+
+                  sysroot:
+                    dev_packages:
+                      - libsdl3-dev
+
                   backends:
                     wayland-egl:
                       BUILD_BACKEND_WAYLAND_EGL: 'ON'
@@ -133,6 +144,21 @@ jobs:
           print(updated)
           PY
 
+      - name: Clone ivi-homescreen plugins
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git clone --depth 1 \
+            https://github.com/toyota-connected/ivi-homescreen-plugins.git \
+            "$RUNNER_TEMP/embedded-build/ivi-homescreen-plugins"
+
+          PLUGINS_DIR="$RUNNER_TEMP/embedded-build/ivi-homescreen-plugins/plugins"
+
+          test -f "$PLUGINS_DIR/CMakeLists.txt"
+          test -f "$PLUGINS_DIR/gamepads_linux/CMakeLists.txt"
+
+          echo "Gamepads Linux plugin found."
 
       - name: Build native Wayland C++ scanner
         shell: bash
@@ -163,7 +189,6 @@ jobs:
           echo "$INSTALL_DIR/bin" >> "$GITHUB_PATH"
 
           "$INSTALL_DIR/bin/wayland-cxx-scanner" --help
-
 
       - name: Bootstrap emb_cli
         shell: bash
@@ -228,7 +253,7 @@ jobs:
             --backend wayland-egl \
             --dry-run
 
-          echo "=== Build embedder and Flutter application ==="
+          echo "=== Build embedder, plugins and Flutter application ==="
 
           emb -v cross "$MANIFEST" \
             --workspace "$WORKSPACE" \
@@ -245,7 +270,6 @@ jobs:
 
           WORKSPACE="$RUNNER_TEMP/flutter-workspace"
 
-          # Locate the runnable bundle produced by emb.
           HOMESCREEN="$(find "$WORKSPACE/.config/flutter_workspace" \
             -type f \
             -path '*/runnable/homescreen' \
@@ -260,7 +284,6 @@ jobs:
 
           echo "Runnable directory: $RUNNABLE_DIR"
 
-          # Validate expected runtime files.
           test -x "$RUNNABLE_DIR/homescreen"
           test -f "$RUNNABLE_DIR/lib/libapp.so"
           test -f "$RUNNABLE_DIR/lib/libflutter_engine.so"
