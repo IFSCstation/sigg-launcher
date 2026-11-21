@@ -60,6 +60,7 @@ jobs:
             build-essential \
             cmake \
             ninja-build \
+            libpugixml-dev \
             pkg-config \
             libsystemd-dev \
             packagekit \
