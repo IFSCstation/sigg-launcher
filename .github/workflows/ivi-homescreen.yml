@@ -133,6 +133,38 @@ jobs:
           print(updated)
           PY
 
+
+      - name: Build native Wayland C++ scanner
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          IVI_DIR="$RUNNER_TEMP/embedded-build/ivi-homescreen"
+          SCANNER_DIR="$IVI_DIR/third_party/wayland-cxx-scanner"
+          BUILD_DIR="$RUNNER_TEMP/wayland-cxx-host-build"
+          INSTALL_DIR="$RUNNER_TEMP/wayland-cxx-host"
+
+          test -f "$SCANNER_DIR/CMakeLists.txt"
+
+          cmake -S "$SCANNER_DIR" \
+            -B "$BUILD_DIR" \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR" \
+            -DWAYLAND_CXX_SCANNER_TOOL_ONLY=ON \
+            -DWAYLAND_CXX_SCANNER_INSTALL_TOOL=ON
+
+          cmake --build "$BUILD_DIR" --parallel "$(nproc)"
+
+          cmake --install "$BUILD_DIR"
+
+          test -x "$INSTALL_DIR/bin/wayland-cxx-scanner"
+
+          echo "$INSTALL_DIR/bin" >> "$GITHUB_PATH"
+
+          "$INSTALL_DIR/bin/wayland-cxx-scanner" --help
+
+
       - name: Bootstrap emb_cli
         shell: bash
         working-directory: ${{ runner.temp }}/embedded-build/emb_cli
