@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:material_ui/material_ui.dart';
+import 'package:flutter/material.dart';
 import 'package:sigg_launcher/screens/home/widgets/mock_games.dart';
 import 'package:sigg_launcher/services/bgm_player.dart';
 import 'package:sigg_launcher/services/game_run_state.dart';

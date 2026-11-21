@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:material_ui/material_ui.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:gamepads/gamepads.dart';
 import 'package:sigg_launcher/screens/home/pages/achievements_page.dart';
