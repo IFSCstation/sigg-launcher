@@ -1,4 +1,3 @@
-
 name: Build Linux ARM64 (ivi-homescreen)
 
 concurrency:
@@ -10,22 +9,16 @@ on:
     inputs:
       flutter-version:
         description: Flutter SDK version
-        required: false
         default: '3.47.7'
         type: string
-
       build-mode:
         description: Flutter build mode
         required: true
         default: release
         type: choice
-        options:
-          - release
-          - profile
-
+        options: [release, profile]
       launcher-args:
         description: Runtime arguments baked into run.sh
-        required: false
         default: ''
 
 permissions:
@@ -45,227 +38,88 @@ jobs:
       DEBIAN_FRONTEND: noninteractive
 
     steps:
-      - name: Check out application
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
 
       - name: Install build dependencies
-        shell: bash
         run: |
-          set -euo pipefail
-
           sudo apt-get update -y
-
           sudo apt-get install -y --no-install-recommends \
-            git \
-            python3 \
-            build-essential \
-            cmake \
-            ninja-build \
-            libpugixml-dev \
-            pkg-config \
-            libsystemd-dev \
-            packagekit \
-            meson \
-            libwayland-bin \
-            tar \
-            xz-utils \
-            rsync \
-            unzip \
-            dpkg \
-            fdisk \
-            e2fsprogs \
-            hwdata
+            build-essential cmake ninja-build meson pkg-config \
+            libpugixml-dev libsystemd-dev packagekit libwayland-bin \
+            xz-utils rsync unzip fdisk e2fsprogs hwdata
 
-      - name: Clone emb_cli and ivi-homescreen
-        shell: bash
+      - name: Clone sources and prepare manifest
         run: |
           set -euo pipefail
+          B="$RUNNER_TEMP/embedded-build"
+          mkdir -p "$B"
 
-          mkdir -p "$RUNNER_TEMP/embedded-build"
-
-          git clone --depth 1 \
-            https://github.com/toyota-connected/emb_cli.git \
-            "$RUNNER_TEMP/embedded-build/emb_cli"
-
+          git clone --depth 1 https://github.com/toyota-connected/emb_cli.git "$B/emb_cli"
           git clone --depth 1 --recurse-submodules \
-            https://github.com/toyota-connected/ivi-homescreen.git \
-            "$RUNNER_TEMP/embedded-build/ivi-homescreen"
+            https://github.com/toyota-connected/ivi-homescreen.git "$B/ivi-homescreen"
+          git clone --depth 1 --recurse-submodules --shallow-submodules \
+            https://github.com/toyota-connected/ivi-homescreen-plugins.git "$B/ivi-homescreen-plugins"
 
-          EMB_DIR="$RUNNER_TEMP/embedded-build/emb_cli"
-          IVI_DIR="$RUNNER_TEMP/embedded-build/ivi-homescreen"
-
-          cp "$EMB_DIR/examples/cross/all-backends.emb.yaml" \
-            "$IVI_DIR/rpi4-trixie.emb.yaml"
+          M="$B/ivi-homescreen/rpi4-trixie.emb.yaml"
+          cp "$B/emb_cli/examples/cross/all-backends.emb.yaml" "$M"
 
           # Add the Raspberry Pi 4 Trixie target and gamepads plugin.
-          python3 - "$IVI_DIR/rpi4-trixie.emb.yaml" <<'PY'
+          python3 - "$M" <<'PY'
           import sys
-          import textwrap
           from pathlib import Path
 
           path = Path(sys.argv[1])
           content = path.read_text()
-
           needle = "  backends:\n"
+          assert content.count(needle) == 1, "Could not locate exactly one cross.backends section"
 
-          if content.count(needle) != 1:
-              raise SystemExit(
-                  "Could not locate exactly one cross.backends section"
-              )
-
-          target = textwrap.indent(
-              textwrap.dedent("""\
-              targets:
-                rpi4-trixie:
-                  extends: rpi4-trixie
-                  cpu_flags: [-mcpu=cortex-a72]
-
-                  defines:
-                    DISABLE_PLUGINS: 'OFF'
-                    PLUGINS_DIR: '../ivi-homescreen-plugins/plugins'
-                    BUILD_PLUGIN_GAMEPADS_LINUX: 'ON'
-
-                  sysroot:
-                    dev_packages:
-                      - libsdl3-dev
-
-                  backends:
-                    wayland-egl:
-                      BUILD_BACKEND_WAYLAND_EGL: 'ON'
-                      BUILD_BACKEND_WAYLAND_VULKAN: 'OFF'
-              """),
-              "  "
-          )
-
-          updated = content.replace(needle, target + needle, 1)
-          path.write_text(updated)
-
-          print("Generated Raspberry Pi manifest:")
-          print(updated)
+          target = """  targets:
+              rpi4-trixie:
+                extends: rpi4-trixie
+                cpu_flags: [-mcpu=cortex-a72]
+                defines:
+                  DISABLE_PLUGINS: 'OFF'
+                  PLUGINS_DIR: '../ivi-homescreen-plugins/plugins'
+                  BUILD_PLUGIN_GAMEPADS_LINUX: 'ON'
+                sysroot:
+                  dev_packages:
+                    - libsdl3-dev
+                backends:
+                  wayland-egl:
+                    BUILD_BACKEND_WAYLAND_EGL: 'ON'
+                    BUILD_BACKEND_WAYLAND_VULKAN: 'OFF'
+          """
+          path.write_text(content.replace(needle, target + needle, 1))
           PY
 
-
-      - name: Clone ivi-homescreen plugins
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          PLUGINS_REPO="$RUNNER_TEMP/embedded-build/ivi-homescreen-plugins"
-
-          git clone \
-            --depth 1 \
-            --recurse-submodules \
-            --shallow-submodules \
-            https://github.com/toyota-connected/ivi-homescreen-plugins.git \
-            "$PLUGINS_REPO"
-
-          PLUGINS_DIR="$PLUGINS_REPO/plugins"
-
-          test -f "$PLUGINS_DIR/CMakeLists.txt"
-          test -f "$PLUGINS_DIR/gamepads_linux/CMakeLists.txt"
-          test -f "$PLUGINS_DIR/common/sdbus/third_party/sdbus-cpp/CMakeLists.txt"
-
-          echo "Gamepads Linux plugin found."
-          echo "Git submodules initialized successfully."
-
-
       - name: Build native Wayland C++ scanner
-        shell: bash
         run: |
           set -euo pipefail
+          S="$RUNNER_TEMP/embedded-build/ivi-homescreen/third_party/wayland-cxx-scanner"
+          I="$RUNNER_TEMP/wayland-cxx-host"
 
-          IVI_DIR="$RUNNER_TEMP/embedded-build/ivi-homescreen"
-          SCANNER_DIR="$IVI_DIR/third_party/wayland-cxx-scanner"
-          BUILD_DIR="$RUNNER_TEMP/wayland-cxx-host-build"
-          INSTALL_DIR="$RUNNER_TEMP/wayland-cxx-host"
-
-          test -f "$SCANNER_DIR/CMakeLists.txt"
-
-          cmake -S "$SCANNER_DIR" \
-            -B "$BUILD_DIR" \
-            -G Ninja \
+          cmake -S "$S" -B "$RUNNER_TEMP/wayland-cxx-host-build" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR" \
+            -DCMAKE_INSTALL_PREFIX="$I" \
             -DWAYLAND_CXX_SCANNER_TOOL_ONLY=ON \
             -DWAYLAND_CXX_SCANNER_INSTALL_TOOL=ON
+          cmake --build "$RUNNER_TEMP/wayland-cxx-host-build" --parallel "$(nproc)"
+          cmake --install "$RUNNER_TEMP/wayland-cxx-host-build"
 
-          cmake --build "$BUILD_DIR" --parallel "$(nproc)"
+          echo "$I/bin" >> "$GITHUB_PATH"
 
-          cmake --install "$BUILD_DIR"
-
-          test -x "$INSTALL_DIR/bin/wayland-cxx-scanner"
-
-          echo "$INSTALL_DIR/bin" >> "$GITHUB_PATH"
-
-          "$INSTALL_DIR/bin/wayland-cxx-scanner" --help
-
-      - name: Bootstrap emb_cli
-        shell: bash
+      - name: Cross-build embedder, plugins and Flutter app
         working-directory: ${{ runner.temp }}/embedded-build/emb_cli
         run: |
           set -euo pipefail
-
-          eval "$(./bootstrap.sh --shellenv)"
-          emb --version
-
-      - name: Prepare Flutter SDK
-        shell: bash
-        working-directory: ${{ runner.temp }}/embedded-build/emb_cli
-        run: |
-          set -euo pipefail
-
           eval "$(./bootstrap.sh --shellenv)"
 
-          WORKSPACE="$RUNNER_TEMP/flutter-workspace"
+          WS="$RUNNER_TEMP/flutter-workspace"
+          emb flutter --workspace "$WS" --flutter-version "$FLUTTER_VERSION"
+          source "$WS/setup_env.sh"
 
-          emb flutter \
-            --workspace "$WORKSPACE" \
-            --flutter-version "$FLUTTER_VERSION"
-
-          test -f "$WORKSPACE/setup_env.sh"
-
-      - name: Cross-build ivi-homescreen and Flutter application
-        shell: bash
-        working-directory: ${{ runner.temp }}/embedded-build/emb_cli
-        run: |
-          set -euo pipefail
-
-          eval "$(./bootstrap.sh --shellenv)"
-
-          WORKSPACE="$RUNNER_TEMP/flutter-workspace"
-          IVI_DIR="$RUNNER_TEMP/embedded-build/ivi-homescreen"
-          MANIFEST="$IVI_DIR/rpi4-trixie.emb.yaml"
-
-          source "$WORKSPACE/setup_env.sh"
-
-          flutter --version
-
-          echo "=== Available targets ==="
-
-          TARGETS="$(emb cross "$MANIFEST" --list-targets)"
-          echo "$TARGETS"
-
-          if ! grep -Eq '^[[:space:]]*rpi4-trixie[[:space:]]' <<< "$TARGETS"; then
-            echo "::error::Target rpi4-trixie was not registered"
-            echo "Check the generated manifest and board configuration."
-            exit 1
-          fi
-
-          echo "=== Validate Raspberry Pi board profile ==="
-
-          emb doctor --target rpi4-trixie "$MANIFEST"
-
-          echo "=== Cross-build dry run ==="
-
-          emb cross "$MANIFEST" \
-            --target rpi4-trixie \
-            --backend wayland-egl \
-            --dry-run
-
-          echo "=== Build embedder, plugins and Flutter application ==="
-
-          emb -v cross "$MANIFEST" \
-            --workspace "$WORKSPACE" \
+          emb -v cross "$RUNNER_TEMP/embedded-build/ivi-homescreen/rpi4-trixie.emb.yaml" \
+            --workspace "$WS" \
             --target rpi4-trixie \
             --backend wayland-egl \
             --app "$GITHUB_WORKSPACE" \
@@ -273,78 +127,29 @@ jobs:
             --build
 
       - name: Package runnable bundle
-        shell: bash
         run: |
           set -euo pipefail
 
-          WORKSPACE="$RUNNER_TEMP/flutter-workspace"
-
-          HOMESCREEN="$(find "$WORKSPACE/.config/flutter_workspace" \
-            -type f \
-            -path '*/runnable/homescreen' \
-            -print -quit)"
-
-          if [[ -z "$HOMESCREEN" ]]; then
-            echo "::error::Could not find runnable/homescreen"
-            exit 1
-          fi
-
+          HOMESCREEN="$(find "$RUNNER_TEMP/flutter-workspace/.config/flutter_workspace" \
+            -type f -path '*/runnable/homescreen' -print -quit)"
+          [[ -n "$HOMESCREEN" ]] || { echo "::error::Could not find runnable/homescreen"; exit 1; }
           RUNNABLE_DIR="$(dirname "$HOMESCREEN")"
 
-          echo "Runnable directory: $RUNNABLE_DIR"
-
-          test -x "$RUNNABLE_DIR/homescreen"
-          test -f "$RUNNABLE_DIR/lib/libapp.so"
-          test -f "$RUNNABLE_DIR/lib/libflutter_engine.so"
-          test -f "$RUNNABLE_DIR/lib/libihs_shared.so.1"
-          test -d "$RUNNABLE_DIR/data/flutter_assets"
-
-          # Generate run.sh.
-          export RUNNABLE_DIR
-
-          python3 <<'PY'
-          import os
-          import shlex
-
-          directory = os.environ["RUNNABLE_DIR"]
-          args = shlex.split(os.environ.get("LAUNCHER_ARGS", ""))
-
-          script = """#!/bin/sh
-          HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-          exec "$HERE/homescreen" -b "$HERE" %s "$@"
-          """ % " ".join(shlex.quote(arg) for arg in args)
-
-          path = os.path.join(directory, "run.sh")
-
-          with open(path, "w", encoding="utf-8") as file:
-              file.write(script)
-
-          os.chmod(path, 0o755)
-          PY
-
-          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cat > "$RUNNABLE_DIR/run.sh" <<EOF
+          #!/bin/sh
+          HERE="\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)"
+          exec "\$HERE/homescreen" -b "\$HERE" $LAUNCHER_ARGS "\$@"
+          EOF
+          chmod +x "$RUNNABLE_DIR/run.sh"
 
           PACKAGE="sigg_launcher-ivi-linux-arm64.tar.gz"
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          tar -C "$RUNNABLE_DIR" -czf "$GITHUB_WORKSPACE/dist/$PACKAGE" .
+          (cd "$GITHUB_WORKSPACE/dist" && sha256sum "$PACKAGE" > "$PACKAGE.sha256")
 
-          tar -C "$RUNNABLE_DIR" \
-            -czf "$GITHUB_WORKSPACE/dist/$PACKAGE" .
-
-          cd "$GITHUB_WORKSPACE/dist"
-
-          sha256sum "$PACKAGE" > "$PACKAGE.sha256"
-
-          echo "=== Package contents ==="
-          tar -tzf "$PACKAGE"
-
-          echo "=== Package size ==="
-          du -h "$PACKAGE"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7
         with:
           name: sigg_launcher-ivi-linux-arm64
-          path: |
-            dist/sigg_launcher-ivi-linux-arm64.tar.gz
-            dist/sigg_launcher-ivi-linux-arm64.tar.gz.sha256
+          path: dist/sigg_launcher-ivi-linux-arm64.tar.gz*
           if-no-files-found: error
           retention-days: 14
