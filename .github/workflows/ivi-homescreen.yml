@@ -144,21 +144,30 @@ jobs:
           print(updated)
           PY
 
+
       - name: Clone ivi-homescreen plugins
         shell: bash
         run: |
           set -euo pipefail
 
-          git clone --depth 1 \
-            https://github.com/toyota-connected/ivi-homescreen-plugins.git \
-            "$RUNNER_TEMP/embedded-build/ivi-homescreen-plugins"
+          PLUGINS_REPO="$RUNNER_TEMP/embedded-build/ivi-homescreen-plugins"
 
-          PLUGINS_DIR="$RUNNER_TEMP/embedded-build/ivi-homescreen-plugins/plugins"
+          git clone \
+            --depth 1 \
+            --recurse-submodules \
+            --shallow-submodules \
+            https://github.com/toyota-connected/ivi-homescreen-plugins.git \
+            "$PLUGINS_REPO"
+
+          PLUGINS_DIR="$PLUGINS_REPO/plugins"
 
           test -f "$PLUGINS_DIR/CMakeLists.txt"
           test -f "$PLUGINS_DIR/gamepads_linux/CMakeLists.txt"
+          test -f "$PLUGINS_DIR/common/sdbus/third_party/sdbus-cpp/CMakeLists.txt"
 
           echo "Gamepads Linux plugin found."
+          echo "Git submodules initialized successfully."
+
 
       - name: Build native Wayland C++ scanner
         shell: bash
