@@ -1,0 +1,212 @@
+
+name: Build Linux ARM64 (ivi-homescreen)
+
+concurrency:
+  group: build-linux-arm64
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+    inputs:
+      flutter-version:
+        description: Flutter SDK version
+        required: false
+        default: '3.47.7'
+        type: string
+
+      build-mode:
+        description: Flutter build mode
+        required: true
+        default: release
+        type: choice
+        options:
+          - release
+          - profile
+
+      launcher-args:
+        description: Runtime arguments baked into run.sh
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build sigg_launcher for ARM64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    env:
+      FLUTTER_VERSION: ${{ inputs.flutter-version }}
+      BUILD_MODE: ${{ inputs.build-mode }}
+      LAUNCHER_ARGS: ${{ inputs.launcher-args }}
+      EMB_NON_INTERACTIVE: '1'
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      - name: Check out application
+        uses: actions/checkout@v7
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+
+          sudo apt-get install -y --no-install-recommends \
+            git \
+            python3 \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libsystemd-dev \
+            packagekit \
+            meson \
+            libwayland-bin \
+            tar \
+            xz-utils \
+            rsync \
+            unzip \
+            dpkg \
+            fdisk \
+            e2fsprogs \
+            hwdata
+
+      - name: Clone emb_cli and ivi-homescreen
+        run: |
+          mkdir -p "$RUNNER_TEMP/embedded-build"
+
+          git clone --depth 1 \
+            https://github.com/toyota-connected/emb_cli.git \
+            "$RUNNER_TEMP/embedded-build/emb_cli"
+
+          git clone --depth 1 --recurse-submodules \
+            https://github.com/toyota-connected/ivi-homescreen.git \
+            "$RUNNER_TEMP/embedded-build/ivi-homescreen"
+
+          # The cross manifest is distributed with emb_cli.
+          cp \
+            "$RUNNER_TEMP/embedded-build/emb_cli/examples/cross/all-backends.emb.yaml" \
+            "$RUNNER_TEMP/embedded-build/ivi-homescreen/all-backends.emb.yaml"
+
+      - name: Bootstrap emb_cli
+        working-directory: ${{ runner.temp }}/embedded-build/emb_cli
+        run: |
+          eval "$(./bootstrap.sh --shellenv)"
+          emb --version
+
+      - name: Prepare Flutter SDK
+        working-directory: ${{ runner.temp }}/embedded-build/emb_cli
+        run: |
+          eval "$(./bootstrap.sh --shellenv)"
+
+          WORKSPACE="$RUNNER_TEMP/flutter-workspace"
+
+          emb flutter \
+            --workspace "$WORKSPACE" \
+            --flutter-version "$FLUTTER_VERSION"
+
+          test -f "$WORKSPACE/setup_env.sh"
+
+      - name: Cross-build ivi-homescreen and Flutter application
+        working-directory: ${{ runner.temp }}/embedded-build/emb_cli
+        run: |
+          eval "$(./bootstrap.sh --shellenv)"
+
+          WORKSPACE="$RUNNER_TEMP/flutter-workspace"
+          IVI_DIR="$RUNNER_TEMP/embedded-build/ivi-homescreen"
+
+          # Load the Flutter SDK provisioned in the previous step.
+          source "$WORKSPACE/setup_env.sh"
+
+          echo "Flutter version:"
+          flutter --version
+
+          echo "Starting ARM64 cross-build..."
+
+          emb -v cross \
+            "$IVI_DIR/all-backends.emb.yaml" \
+            --workspace "$WORKSPACE" \
+            --target ivi-homescreen \
+            --backend wayland-egl \
+            --app "$GITHUB_WORKSPACE" \
+            --mode "$BUILD_MODE" \
+            --build
+
+      - name: Package runnable bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          WORKSPACE="$RUNNER_TEMP/flutter-workspace"
+
+          # Locate the runnable bundle produced by emb.
+          HOMESCREEN="$(find "$WORKSPACE/.config/flutter_workspace" \
+            -type f \
+            -path '*/runnable/homescreen' \
+            -print -quit)"
+
+          if [[ -z "$HOMESCREEN" ]]; then
+            echo "::error::Could not find runnable/homescreen"
+            exit 1
+          fi
+
+          RUNNABLE_DIR="$(dirname "$HOMESCREEN")"
+
+          echo "Runnable directory: $RUNNABLE_DIR"
+
+          # Validate expected runtime files.
+          test -x "$RUNNABLE_DIR/homescreen"
+          test -f "$RUNNABLE_DIR/lib/libapp.so"
+          test -f "$RUNNABLE_DIR/lib/libflutter_engine.so"
+          test -f "$RUNNABLE_DIR/lib/libihs_shared.so.1"
+          test -d "$RUNNABLE_DIR/data/flutter_assets"
+
+          # Generate run.sh. Parse arguments safely and preserve spaces.
+          export RUNNABLE_DIR
+
+          python3 <<'PY'
+          import os
+          import shlex
+
+          directory = os.environ["RUNNABLE_DIR"]
+          args = shlex.split(os.environ.get("LAUNCHER_ARGS", ""))
+
+          script = """#!/bin/sh
+          HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+          exec "$HERE/homescreen" -b "$HERE" %s "$@"
+          """ % " ".join(shlex.quote(arg) for arg in args)
+
+          path = os.path.join(directory, "run.sh")
+          with open(path, "w", encoding="utf-8") as file:
+              file.write(script)
+
+          os.chmod(path, 0o755)
+          PY
+
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+
+          PACKAGE="sigg_launcher-ivi-linux-arm64.tar.gz"
+
+          tar -C "$RUNNABLE_DIR" \
+            -czf "$GITHUB_WORKSPACE/dist/$PACKAGE" .
+
+          cd "$GITHUB_WORKSPACE/dist"
+
+          sha256sum "$PACKAGE" > "$PACKAGE.sha256"
+
+          echo "Package contents:"
+          tar -tzf "$PACKAGE"
+
+          echo "Package size:"
+          du -h "$PACKAGE"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: sigg_launcher-ivi-linux-arm64
+          path: |
+            dist/sigg_launcher-ivi-linux-arm64.tar.gz
+            dist/sigg_launcher-ivi-linux-arm64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
