@@ -72,22 +72,54 @@ jobs:
             e2fsprogs \
             hwdata
 
-      - name: Clone emb_cli and ivi-homescreen
-        run: |
-          mkdir -p "$RUNNER_TEMP/embedded-build"
+      
+    - name: Clone emb_cli and ivi-homescreen
+      run: |
+        mkdir -p "$RUNNER_TEMP/embedded-build"
 
-          git clone --depth 1 \
-            https://github.com/toyota-connected/emb_cli.git \
-            "$RUNNER_TEMP/embedded-build/emb_cli"
+        git clone --depth 1 \
+          https://github.com/toyota-connected/emb_cli.git \
+          "$RUNNER_TEMP/embedded-build/emb_cli"
 
-          git clone --depth 1 --recurse-submodules \
-            https://github.com/toyota-connected/ivi-homescreen.git \
-            "$RUNNER_TEMP/embedded-build/ivi-homescreen"
+        git clone --depth 1 --recurse-submodules \
+          https://github.com/toyota-connected/ivi-homescreen.git \
+          "$RUNNER_TEMP/embedded-build/ivi-homescreen"
 
-          # The cross manifest is distributed with emb_cli.
-          cp \
-            "$RUNNER_TEMP/embedded-build/emb_cli/examples/cross/all-backends.emb.yaml" \
-            "$RUNNER_TEMP/embedded-build/ivi-homescreen/all-backends.emb.yaml"
+        EMB_DIR="$RUNNER_TEMP/embedded-build/emb_cli"
+        IVI_DIR="$RUNNER_TEMP/embedded-build/ivi-homescreen"
+
+        cp "$EMB_DIR/examples/cross/all-backends.emb.yaml" \
+            "$IVI_DIR/rpi4-trixie.emb.yaml"
+
+        # Add the Raspberry Pi 4 Trixie board profile.
+        python3 - "$IVI_DIR/rpi4-trixie.emb.yaml" <<'PY'
+        import sys
+        from pathlib import Path
+
+        path = Path(sys.argv[1])
+        content = path.read_text()
+
+        needle = "  backends:\n"
+
+        if content.count(needle) != 1:
+            raise SystemExit("Could not locate cross.backends in manifest")
+
+        target = """  targets:
+          rpi4-trixie:
+            extends: rpi4-trixie
+            cpu_flags: [-mcpu=cortex-a72]
+            backends:
+              wayland-egl:
+                BUILD_BACKEND_WAYLAND_EGL: 'ON'
+                BUILD_BACKEND_WAYLAND_VULKAN: 'OFF'
+        """
+
+        path.write_text(content.replace(needle, target + needle, 1))
+        PY
+
+        echo "Generated Raspberry Pi manifest:"
+        cat "$IVI_DIR/rpi4-trixie.emb.yaml"
+
 
       - name: Bootstrap emb_cli
         working-directory: ${{ runner.temp }}/embedded-build/emb_cli
@@ -108,30 +140,36 @@ jobs:
 
           test -f "$WORKSPACE/setup_env.sh"
 
+
       - name: Cross-build ivi-homescreen and Flutter application
-        working-directory: ${{ runner.temp }}/embedded-build/emb_cli
         run: |
           eval "$(./bootstrap.sh --shellenv)"
 
           WORKSPACE="$RUNNER_TEMP/flutter-workspace"
           IVI_DIR="$RUNNER_TEMP/embedded-build/ivi-homescreen"
+          MANIFEST="$IVI_DIR/rpi4-trixie.emb.yaml"
 
-          # Load the Flutter SDK provisioned in the previous step.
           source "$WORKSPACE/setup_env.sh"
 
-          echo "Flutter version:"
           flutter --version
 
-          echo "Starting ARM64 cross-build..."
+          # Verify the Raspberry Pi board profile and toolchain resolution.
+          emb doctor --target rpi4-trixie "$MANIFEST"
 
-          emb -v cross \
-            "$IVI_DIR/all-backends.emb.yaml" \
+          emb cross "$MANIFEST" \
+            --target rpi4-trixie \
+            --backend wayland-egl \
+            --dry-run
+
+          # Build the embedder and Flutter application.
+          emb -v cross "$MANIFEST" \
             --workspace "$WORKSPACE" \
-            --target ivi-homescreen \
+            --target rpi4-trixie \
             --backend wayland-egl \
             --app "$GITHUB_WORKSPACE" \
             --mode "$BUILD_MODE" \
             --build
+        working-directory: ${{ runner.temp }}/embedded-build/emb_cli
 
       - name: Package runnable bundle
         shell: bash
