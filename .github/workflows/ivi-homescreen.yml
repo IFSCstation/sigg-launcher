@@ -272,6 +272,56 @@ jobs:
             --mode "$BUILD_MODE" \
             --build
 
+
+
+      - name: Verify gamepads plugin in runnable bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          WORKSPACE="$RUNNER_TEMP/flutter-workspace"
+
+          HOMESCREEN="$(find "$WORKSPACE/.config/flutter_workspace" \
+            -type f \
+            -path '*/runnable/homescreen' \
+            -print -quit)"
+
+          RUNNABLE_DIR="$(dirname "$HOMESCREEN")"
+
+          echo "=== Gamepads symbols in bundle ==="
+
+          FOUND=0
+
+          while IFS= read -r -d '' file; do
+            MATCHES="$(strings "$file" | grep -E \
+              'xyz.luan/gamepads|listGamepads|GamepadsLinuxPlugin' || true)"
+
+            if [[ -n "$MATCHES" ]]; then
+              echo "FOUND: $file"
+              echo "$MATCHES"
+              FOUND=1
+            fi
+          done < <(
+            find "$RUNNABLE_DIR" -type f \
+              \( -name '*.so' -o -name '*.so.*' -o -name homescreen \) \
+              -print0
+          )
+
+          if [[ "$FOUND" -eq 0 ]]; then
+            echo "::warning::Gamepads channel not found in runnable binaries"
+          fi
+
+          echo "=== Generated plugin registration ==="
+
+          grep -RniE \
+            'GamepadsLinuxPlugin|gamepads_linux|GAMEPADS' \
+            "$RUNNER_TEMP/flutter-workspace/.config/flutter_workspace" \
+            --include='*.cc' \
+            --include='*.cpp' \
+            --include='*.h' \
+            --include='*.cmake' || true
+
+
       - name: Package runnable bundle
         shell: bash
         run: |
