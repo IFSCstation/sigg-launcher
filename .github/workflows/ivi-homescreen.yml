@@ -150,9 +150,10 @@ jobs:
 
           flutter --version
 
-          # Verify the Raspberry Pi board profile and toolchain resolution.
-          emb doctor --target rpi4-trixie "$MANIFEST"
+          # List targets declared in the cross manifest.
+          emb cross "$MANIFEST" --list-targets
 
+          # Validate toolchain, sysroot and backend resolution.
           emb cross "$MANIFEST" \
             --target rpi4-trixie \
             --backend wayland-egl \
