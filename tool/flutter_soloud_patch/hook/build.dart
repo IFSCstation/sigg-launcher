@@ -2574,7 +2574,7 @@ Future<void> _crossCompileLinux({
   required List<String> xiphLibs,
   required Uri outDir,
 }) async {
-  final crossGcc = await _findCrossCompiler();
+  final crossGcc = await _findCrossCompiler(input: input);
   if (crossGcc == null) {
     throw StateError(
       '[flutter_soloud] Cross-compiling for Linux ARM64 but no '
@@ -2663,14 +2663,55 @@ Future<void> _crossCompileLinux({
 ///
 /// emb_cli places aarch64-none-linux-gnu-gcc in the hook-toolchain
 /// directory which is first on PATH during build hook execution.
-Future<String?> _findCrossCompiler() async {
-  final candidates = ['aarch64-none-linux-gnu-gcc', 'aarch64-linux-gnu-gcc'];
-  for (final name in candidates) {
-    final which = await Process.run('which', [name]);
-    if (which.exitCode == 0) {
-      return which.stdout.trim().split('\n').first;
+Future<String?> _findCrossCompiler({required BuildInput input}) async {
+  // First, check if emb_cli provided a cross-compiler via cCompiler.compiler.
+  // For cross-compilation targets this should point to the cross-compiler.
+  try {
+    final cCompiler = input.config.code.cCompiler;
+    if (cCompiler != null) {
+      final ccPath = cCompiler.compiler.toFilePath();
+      final ccFile = File(ccPath);
+      if (ccFile.existsSync() &&
+          (ccPath.contains('aarch64') || ccPath.contains('arm64'))) {
+        return ccPath;
+      }
+    }
+  } catch (_) {}
+
+  // Search PATH directories directly for candidate cross-compiler
+  // executables. emb_cli places cross-compiler symlinks in the hook-toolchain
+  // directory which is first on PATH during build hook execution. Searching
+  // PATH directly is more reliable than using `which` in this context.
+  final pathEnv = Platform.environment['PATH'] ?? '';
+  final pathDirs = pathEnv.split(Platform.pathSeparator);
+
+  final candidates = <String>[
+    'aarch64-none-linux-gnu-gcc',
+    'aarch64-linux-gnu-gcc',
+    'aarch64-none-linux-gnu-gcc-15',
+    'aarch64-none-linux-gnu-gcc-14',
+    'aarch64-none-linux-gnu-gcc-13',
+    'aarch64-none-linux-gnu-gcc-12',
+    'aarch64-none-linux-gnu-gcc-11',
+    'aarch64-none-linux-gnu-gcc-10',
+    'aarch64-none-linux-gnu-gcc-9',
+    'aarch64-none-linux-gnu-gcc-8',
+    'aarch64-none-linux-gnu-gcc-7',
+    'aarch64-none-linux-gnu-gcc-6',
+    'aarch64-none-linux-gnu-gcc-5',
+  ];
+
+  for (final dir in pathDirs) {
+    final dirEntity = Directory(dir);
+    if (!dirEntity.existsSync()) continue;
+    for (final name in candidates) {
+      final exe = File('${dirEntity.path}/$name');
+      if (exe.existsSync()) {
+        return exe.path;
+      }
     }
   }
+
   return null;
 }
 
