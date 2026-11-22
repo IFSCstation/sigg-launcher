@@ -160,11 +160,13 @@ jobs:
           EOF
           chmod +x "$RUNNABLE_DIR/run.sh"
 
-          DIST="$GITHUB_WORKSPACE/dist"
-          mkdir -p "$DIST"
+          TAR_DIR="$GITHUB_WORKSPACE/dist/tar"
+          DEB_DIR="$GITHUB_WORKSPACE/dist/deb"
+          mkdir -p "$TAR_DIR" "$DEB_DIR"
 
           # ---- tar.gz ----
-          tar -C "$RUNNABLE_DIR" -czf "$DIST/sigg_launcher-ivi-linux-arm64-$BOARD.tar.gz" .
+          TARBALL="sigg_launcher-ivi-linux-arm64-$BOARD.tar.gz"
+          tar -C "$RUNNABLE_DIR" -czf "$TAR_DIR/$TARBALL" .
 
           # ---- .deb ----
           VERSION="$(sed -nE 's/^version:[[:space:]]*([^[:space:]+]+).*/\1/p' "$GITHUB_WORKSPACE/pubspec.yaml" | head -n1)"
@@ -194,15 +196,22 @@ jobs:
           EOF
 
           find "$ROOT" -type d -exec chmod 755 {} +
-          dpkg-deb --root-owner-group --build "$ROOT" "$DIST/${PKG}_${VERSION}_arm64.deb"
-          dpkg-deb --info "$DIST/${PKG}_${VERSION}_arm64.deb"
+          DEB="${PKG}_${VERSION}_arm64.deb"
+          dpkg-deb --root-owner-group --build "$ROOT" "$DEB_DIR/$DEB"
+          dpkg-deb --info "$DEB_DIR/$DEB"
 
-          cd "$DIST"
-          sha256sum * > "SHA256SUMS-$BOARD.txt"
-
-      - uses: actions/upload-artifact@v7
+      - name: Upload tar.gz (unzipped)
+        uses: actions/upload-artifact@v7
         with:
-          name: sigg_launcher-ivi-linux-arm64-${{ matrix.board }}
-          path: dist/
+          path: dist/tar/*.tar.gz
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload .deb (unzipped)
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/deb/*.deb
+          archive: false
           if-no-files-found: error
           retention-days: 14
