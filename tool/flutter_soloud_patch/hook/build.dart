@@ -2575,6 +2575,9 @@ Future<void> _crossCompileLinux({
   required Uri outDir,
 }) async {
   final crossGcc = await _findCrossCompiler(input: input);
+  print('[flutter_soloud] Selected cross-compiler: $crossGcc');
+  final sysroot = _findSysroot();
+  print('[flutter_soloud] Sysroot: $sysroot');
   if (crossGcc == null) {
     throw StateError(
       '[flutter_soloud] Cross-compiling for Linux ARM64 but no '
@@ -2601,6 +2604,7 @@ Future<void> _crossCompileLinux({
       '-o',
       objectFile.toFilePath(),
       sourceUri.toFilePath(),
+      if (sysroot != null) '--sysroot=$sysroot',
       for (final inc in includes)
         '-I${packageRoot.resolveUri(Uri.file(inc)).toFilePath()}',
       for (final inc in forcedIncludes)
@@ -2630,6 +2634,7 @@ Future<void> _crossCompileLinux({
     '-o',
     libUri.toFilePath(),
     ...objectFiles.map((f) => f.toFilePath()),
+    if (sysroot != null) '--sysroot=$sysroot',
     '-Wl,-rpath,\$ORIGIN',
     for (final dir in xiphLibDirs) '-L$dir',
     for (final lib in xiphLibs) '-l$lib',
@@ -2664,8 +2669,28 @@ Future<void> _crossCompileLinux({
 /// emb_cli places aarch64-none-linux-gnu-gcc in the hook-toolchain
 /// directory which is first on PATH during build hook execution.
 Future<String?> _findCrossCompiler({required BuildInput input}) async {
-  // First, check if emb_cli provided a cross-compiler via cCompiler.compiler.
-  // For cross-compilation targets this should point to the cross-compiler.
+  // Diagnostic: print PATH for debugging cross-compiler discovery.
+  final pathEnv = Platform.environment['PATH'] ?? '';
+  final pathDirs = pathEnv.split(Platform.pathSeparator);
+  print('[flutter_soloud] PATH directories: ${pathDirs.join(', ')}');
+
+  // 1. Check FLUTTER_HOOK_CC environment variable — emb_cli sets this to
+  //    the cross-compiler path, even if this Flutter SDK doesn't read it
+  //    natively (warning: "this Flutter SDK does not read FLUTTER_HOOK_CC").
+  final flHookCc = Platform.environment['FLUTTER_HOOK_CC'];
+  if (flHookCc != null && flHookCc.isNotEmpty) {
+    final ccFile = File(flHookCc);
+    if (ccFile.existsSync()) {
+      print('[flutter_soloud] Found cross-compiler via FLUTTER_HOOK_CC: $flHookCc');
+      return flHookCc;
+    } else {
+      print('[flutter_soloud] FLUTTER_HOOK_CC points to missing file: $flHookCc');
+    }
+  }
+
+  // 2. Check cCompiler.compiler from input.json. emb_cli sets this to the
+  //    host clang for code-asset hooks (warning above), so it usually won't
+  //    be the cross-compiler — but check anyway.
   try {
     final cCompiler = input.config.code.cCompiler;
     if (cCompiler != null) {
@@ -2673,42 +2698,69 @@ Future<String?> _findCrossCompiler({required BuildInput input}) async {
       final ccFile = File(ccPath);
       if (ccFile.existsSync() &&
           (ccPath.contains('aarch64') || ccPath.contains('arm64'))) {
+        print('[flutter_soloud] Found cross-compiler via cCompiler.compiler: $ccPath');
         return ccPath;
+      } else if (ccFile.existsSync()) {
+        print('[flutter_soloud] cCompiler.compiler is host compiler: $ccPath');
       }
     }
   } catch (_) {}
 
-  // Search PATH directories directly for candidate cross-compiler
-  // executables. emb_cli places cross-compiler symlinks in the hook-toolchain
-  // directory which is first on PATH during build hook execution. Searching
-  // PATH directly is more reliable than using `which` in this context.
-  final pathEnv = Platform.environment['PATH'] ?? '';
-  final pathDirs = pathEnv.split(Platform.pathSeparator);
-
-  final candidates = <String>[
-    'aarch64-none-linux-gnu-gcc',
-    'aarch64-linux-gnu-gcc',
-    'aarch64-none-linux-gnu-gcc-15',
-    'aarch64-none-linux-gnu-gcc-14',
-    'aarch64-none-linux-gnu-gcc-13',
-    'aarch64-none-linux-gnu-gcc-12',
-    'aarch64-none-linux-gnu-gcc-11',
-    'aarch64-none-linux-gnu-gcc-10',
-    'aarch64-none-linux-gnu-gcc-9',
-    'aarch64-none-linux-gnu-gcc-8',
-    'aarch64-none-linux-gnu-gcc-7',
-    'aarch64-none-linux-gnu-gcc-6',
-    'aarch64-none-linux-gnu-gcc-5',
-  ];
-
+  // 3. Search PATH directories for any executable whose name contains both
+  //    'aarch64' and 'gcc' — this catches symlinks, wrappers, and versioned
+  //    names that emb_cli may place in hook-toolchain.
   for (final dir in pathDirs) {
     final dirEntity = Directory(dir);
     if (!dirEntity.existsSync()) continue;
-    for (final name in candidates) {
-      final exe = File('${dirEntity.path}/$name');
-      if (exe.existsSync()) {
-        return exe.path;
+    try {
+      for (final entry in dirEntity.listSync()) {
+        if (entry is! File) continue;
+        final name = entry.path.split('/').last;
+        if (name.contains('aarch64') && name.contains('gcc') &&
+            !name.contains('g++')) {
+          print('[flutter_soloud] Found cross-compiler in PATH: ${entry.path}');
+          return entry.path;
+        }
       }
+    } catch (_) {}
+  }
+
+  print('[flutter_soloud] WARNING: No ARM64 cross-compiler found in PATH or FLUTTER_HOOK_CC');
+  return null;
+}
+
+/// Finds the sysroot directory for ARM64 cross-compilation.
+///
+/// emb_cli lays out the workspace as:
+///   .config/flutter_workspace/
+///     cross-aarch64-none-linux-gnu-XXXX/
+///       sysroot/
+///     cross-build-aarch64-none-linux-gnu-YYYY/
+///       hook-toolchain/
+///
+/// We find hook-toolchain in PATH, then look for a sibling directory
+/// named sysroot under the workspace root.
+String? _findSysroot() {
+  final pathEnv = Platform.environment['PATH'] ?? '';
+  for (final dir in pathEnv.split(Platform.pathSeparator)) {
+    final dirEntity = Directory(dir);
+    if (!dirEntity.existsSync()) continue;
+    final dirName = dirEntity.path.split('/').last;
+    if (dirName == 'hook-toolchain') {
+      // hook-toolchain is at <workspace>/cross-build-XXXX/hook-toolchain
+      // Navigate up to workspace root, then look for sysroot siblings.
+      final parent = dirEntity.parent;
+      if (!parent.existsSync()) continue;
+      final workspace = parent.parent;
+      if (!workspace.existsSync()) continue;
+      try {
+        for (final entry in workspace.listSync()) {
+          if (entry is Directory && entry.path.endsWith('/sysroot')) {
+            print('[flutter_soloud] Found sysroot: ${entry.path}');
+            return entry.path;
+          }
+        }
+      } catch (_) {}
     }
   }
 
