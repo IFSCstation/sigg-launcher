@@ -361,8 +361,8 @@ void main(List<String> args) async {
     }
 
     // When cross-compiling for Linux (target arch != host arch), emb_cli sets
-    // \`cCompiler.compiler\` to the host clang in \`input.json\`, which
-    // \`native_toolchain_c\`'s CompilerResolver prioritizes over PATH-based
+    // cCompiler.compiler to the host clang in input.json, which
+    // native_toolchain_c's CompilerResolver prioritizes over PATH-based
     // cross-compiler detection. Host clang cannot produce AArch64 binaries,
     // so we bypass CBuilder and invoke the cross-compiler directly.
     final isCrossLinux =
@@ -2556,10 +2556,11 @@ final class Vst3Link {
     }
     return cacheDir;
   }
+}
 
 /// Cross-compiles the SoLoud plugin for Linux when the target architecture
-/// differs from the host architecture. Used when emb_cli sets `cCompiler`
-/// to host clang in `input.json`, which `native_toolchain_c` prioritizes over
+/// differs from the host architecture. Used when emb_cli sets cCompiler
+/// to host clang in input.json, which native_toolchain_c prioritizes over
 /// PATH-based cross-compiler detection.
 Future<void> _crossCompileLinux({
   required BuildInput input,
@@ -2660,7 +2661,7 @@ Future<void> _crossCompileLinux({
 
 /// Finds the AArch64 Linux cross-compiler on PATH.
 ///
-/// emb_cli places `aarch64-none-linux-gnu-gcc` in the `hook-toolchain`
+/// emb_cli places aarch64-none-linux-gnu-gcc in the hook-toolchain
 /// directory which is first on PATH during build hook execution.
 Future<String?> _findCrossCompiler() async {
   final candidates = ['aarch64-none-linux-gnu-gcc', 'aarch64-linux-gnu-gcc'];
@@ -2673,5 +2674,3 @@ Future<String?> _findCrossCompiler() async {
   return null;
 }
 
-
-}
