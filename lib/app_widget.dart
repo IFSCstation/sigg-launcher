@@ -1,4 +1,4 @@
-import 'package:material_ui/material_ui.dart';
+import 'package:flutter/material.dart';
 import 'package:sigg_launcher/app_controller.dart';
 import 'package:sigg_launcher/screens/home/home.dart';
 import 'package:sigg_launcher/services/fps_counter.dart';

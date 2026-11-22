@@ -1,4 +1,4 @@
-import 'package:material_ui/material_ui.dart';
+import 'package:flutter/material.dart';
 import 'package:sigg_launcher/app_widget.dart';
 import 'package:sigg_launcher/screens/home/pages/audio_settings_page.dart';
 import 'package:sigg_launcher/services/page_nav_controller.dart';

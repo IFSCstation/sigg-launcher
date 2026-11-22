@@ -1,0 +1,158 @@
+name: Build Linux ARM64 (ivi-homescreen)
+
+concurrency:
+  group: build-linux-arm64
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+    inputs:
+      flutter-version:
+        description: Flutter SDK version
+        default: '3.47.7'
+        type: string
+      build-mode:
+        description: Flutter build mode
+        required: true
+        default: release
+        type: choice
+        options: [release, profile]
+      launcher-args:
+        description: Runtime arguments baked into run.sh
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build sigg_launcher for ARM64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    env:
+      FLUTTER_VERSION: ${{ inputs.flutter-version }}
+      BUILD_MODE: ${{ inputs.build-mode }}
+      LAUNCHER_ARGS: ${{ inputs.launcher-args }}
+      EMB_NON_INTERACTIVE: '1'
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build meson pkg-config \
+            libpugixml-dev libsystemd-dev packagekit libwayland-bin \
+            xz-utils rsync unzip fdisk e2fsprogs hwdata
+
+      - name: Clone sources and prepare manifest
+        run: |
+          set -euo pipefail
+          B="$RUNNER_TEMP/embedded-build"
+          mkdir -p "$B"
+
+          git clone --depth 1 https://github.com/toyota-connected/emb_cli.git "$B/emb_cli"
+          git clone --depth 1 --recurse-submodules \
+            https://github.com/toyota-connected/ivi-homescreen.git "$B/ivi-homescreen"
+          git clone --depth 1 --recurse-submodules --shallow-submodules \
+            https://github.com/toyota-connected/ivi-homescreen-plugins.git "$B/ivi-homescreen-plugins"
+
+          M="$B/ivi-homescreen/rpi4-trixie.emb.yaml"
+          cp "$B/emb_cli/examples/cross/all-backends.emb.yaml" "$M"
+
+          # Add the Raspberry Pi 4 Trixie target and gamepads plugin.
+          python3 - "$M" <<'PY'
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          content = path.read_text()
+          needle = "  backends:\n"
+          assert content.count(needle) == 1, "Could not locate exactly one cross.backends section"
+
+          target = """  targets:
+              rpi4-trixie:
+                extends: rpi4-trixie
+                cpu_flags: [-mcpu=cortex-a72]
+                defines:
+                  DISABLE_PLUGINS: 'OFF'
+                  PLUGINS_DIR: '../ivi-homescreen-plugins/plugins'
+                  BUILD_PLUGIN_GAMEPADS_LINUX: 'ON'
+                  BUILD_PLUGIN_AUDIOPLAYERS_LINUX: 'ON'
+                sysroot:
+                  dev_packages:
+                    - libsdl3-dev
+                    - libgstreamer1.0-dev
+                    - libgstreamer-plugins-base1.0-dev
+                backends:
+                  wayland-egl:
+                    BUILD_BACKEND_WAYLAND_EGL: 'ON'
+                    BUILD_BACKEND_WAYLAND_VULKAN: 'OFF'
+          """
+          path.write_text(content.replace(needle, target + needle, 1))
+          PY
+
+      - name: Build native Wayland C++ scanner
+        run: |
+          set -euo pipefail
+          S="$RUNNER_TEMP/embedded-build/ivi-homescreen/third_party/wayland-cxx-scanner"
+          I="$RUNNER_TEMP/wayland-cxx-host"
+
+          cmake -S "$S" -B "$RUNNER_TEMP/wayland-cxx-host-build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$I" \
+            -DWAYLAND_CXX_SCANNER_TOOL_ONLY=ON \
+            -DWAYLAND_CXX_SCANNER_INSTALL_TOOL=ON
+          cmake --build "$RUNNER_TEMP/wayland-cxx-host-build" --parallel "$(nproc)"
+          cmake --install "$RUNNER_TEMP/wayland-cxx-host-build"
+
+          echo "$I/bin" >> "$GITHUB_PATH"
+
+      - name: Cross-build embedder, plugins and Flutter app
+        working-directory: ${{ runner.temp }}/embedded-build/emb_cli
+        run: |
+          set -euo pipefail
+          eval "$(./bootstrap.sh --shellenv)"
+
+          WS="$RUNNER_TEMP/flutter-workspace"
+          emb flutter --workspace "$WS" --flutter-version "$FLUTTER_VERSION"
+          source "$WS/setup_env.sh"
+
+          emb -v cross "$RUNNER_TEMP/embedded-build/ivi-homescreen/rpi4-trixie.emb.yaml" \
+            --workspace "$WS" \
+            --target rpi4-trixie \
+            --backend wayland-egl \
+            --app "$GITHUB_WORKSPACE" \
+            --mode "$BUILD_MODE" \
+            --build
+
+      - name: Package runnable bundle
+        run: |
+          set -euo pipefail
+
+          HOMESCREEN="$(find "$RUNNER_TEMP/flutter-workspace/.config/flutter_workspace" \
+            -type f -path '*/runnable/homescreen' -print -quit)"
+          [[ -n "$HOMESCREEN" ]] || { echo "::error::Could not find runnable/homescreen"; exit 1; }
+          RUNNABLE_DIR="$(dirname "$HOMESCREEN")"
+
+          cat > "$RUNNABLE_DIR/run.sh" <<EOF
+          #!/bin/sh
+          HERE="\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)"
+          exec "\$HERE/homescreen" -b "\$HERE" $LAUNCHER_ARGS "\$@"
+          EOF
+          chmod +x "$RUNNABLE_DIR/run.sh"
+
+          PACKAGE="sigg_launcher-ivi-linux-arm64.tar.gz"
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          tar -C "$RUNNABLE_DIR" -czf "$GITHUB_WORKSPACE/dist/$PACKAGE" .
+          (cd "$GITHUB_WORKSPACE/dist" && sha256sum "$PACKAGE" > "$PACKAGE.sha256")
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sigg_launcher-ivi-linux-arm64
+          path: dist/sigg_launcher-ivi-linux-arm64.tar.gz*
+          if-no-files-found: error
+          retention-days: 14

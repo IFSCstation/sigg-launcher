@@ -1,6 +1,6 @@
 import 'dart:io';
 
-import 'package:material_ui/material_ui.dart';
+import 'package:flutter/material.dart';
 import 'package:sigg_launcher/app_widget.dart';
 import 'package:sigg_launcher/screens/home/pages/game_trophies_page.dart';
 import 'package:sigg_launcher/screens/home/widgets/mock_games.dart';

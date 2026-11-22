@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:material_ui/material_ui.dart';
+import 'package:flutter/material.dart';
 import 'package:sigg_launcher/services/software_category.dart';
 
 /// Manifest listing every repository source the store knows about

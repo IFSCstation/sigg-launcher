@@ -1,4 +1,4 @@
-import 'package:material_ui/material_ui.dart';
+import 'package:flutter/material.dart';
 import 'package:sigg_launcher/screens/home/widgets/mock_users.dart';
 import 'package:sigg_launcher/services/avatar_loader.dart';
 
