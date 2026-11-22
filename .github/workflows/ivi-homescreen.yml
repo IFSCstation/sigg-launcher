@@ -92,20 +92,20 @@ jobs:
           cpu = os.environ["CPU"]
 
           block = f"""  targets:
-            {target}:
-              extends: {target}
-              cpu_flags: [-mcpu={cpu}]
-              defines:
-                DISABLE_PLUGINS: 'OFF'
-                PLUGINS_DIR: '../ivi-homescreen-plugins/plugins'
-                BUILD_PLUGIN_GAMEPADS_LINUX: 'ON'
-              sysroot:
-                dev_packages:
-                  - libsdl3-dev
-              backends:
-                wayland-egl:
-                  BUILD_BACKEND_WAYLAND_EGL: 'ON'
-                  BUILD_BACKEND_WAYLAND_VULKAN: 'OFF'
+              {target}:
+                extends: {target}
+                cpu_flags: [-mcpu={cpu}]
+                defines:
+                  DISABLE_PLUGINS: 'OFF'
+                  PLUGINS_DIR: '../ivi-homescreen-plugins/plugins'
+                  BUILD_PLUGIN_GAMEPADS_LINUX: 'ON'
+                sysroot:
+                  dev_packages:
+                    - libsdl3-dev
+                backends:
+                  wayland-egl:
+                    BUILD_BACKEND_WAYLAND_EGL: 'ON'
+                    BUILD_BACKEND_WAYLAND_VULKAN: 'OFF'
           """
           path.write_text(content.replace(needle, block + needle, 1))
           PY
