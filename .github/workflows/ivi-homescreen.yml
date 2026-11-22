@@ -26,14 +26,28 @@ permissions:
 
 jobs:
   build:
-    name: Build sigg_launcher for ARM64
+    name: Build sigg_launcher (${{ matrix.board }})
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - board: rpi4
+            target: rpi4-trixie
+            cpu: cortex-a72
+          - board: rpi5
+            target: rpi5-trixie
+            cpu: cortex-a76
 
     env:
       FLUTTER_VERSION: ${{ inputs.flutter-version }}
       BUILD_MODE: ${{ inputs.build-mode }}
       LAUNCHER_ARGS: ${{ inputs.launcher-args }}
+      BOARD: ${{ matrix.board }}
+      TARGET: ${{ matrix.target }}
+      CPU: ${{ matrix.cpu }}
       EMB_NON_INTERACTIVE: '1'
       DEBIAN_FRONTEND: noninteractive
 
@@ -60,11 +74,12 @@ jobs:
           git clone --depth 1 --recurse-submodules --shallow-submodules \
             https://github.com/toyota-connected/ivi-homescreen-plugins.git "$B/ivi-homescreen-plugins"
 
-          M="$B/ivi-homescreen/rpi4-trixie.emb.yaml"
+          M="$B/ivi-homescreen/$TARGET.emb.yaml"
           cp "$B/emb_cli/examples/cross/all-backends.emb.yaml" "$M"
 
-          # Add the Raspberry Pi 4 Trixie target and gamepads plugin.
+          # Add the board target and gamepads plugin.
           python3 - "$M" <<'PY'
+          import os
           import sys
           from pathlib import Path
 
@@ -73,10 +88,13 @@ jobs:
           needle = "  backends:\n"
           assert content.count(needle) == 1, "Could not locate exactly one cross.backends section"
 
-          target = """  targets:
-              rpi4-trixie:
-                extends: rpi4-trixie
-                cpu_flags: [-mcpu=cortex-a72]
+          target = os.environ["TARGET"]
+          cpu = os.environ["CPU"]
+
+          block = f"""  targets:
+              {target}:
+                extends: {target}
+                cpu_flags: [-mcpu={cpu}]
                 defines:
                   DISABLE_PLUGINS: 'OFF'
                   PLUGINS_DIR: '../ivi-homescreen-plugins/plugins'
@@ -92,7 +110,7 @@ jobs:
                     BUILD_BACKEND_WAYLAND_EGL: 'ON'
                     BUILD_BACKEND_WAYLAND_VULKAN: 'OFF'
           """
-          path.write_text(content.replace(needle, target + needle, 1))
+          path.write_text(content.replace(needle, block + needle, 1))
           PY
 
       - name: Build native Wayland C++ scanner
@@ -121,15 +139,15 @@ jobs:
           emb flutter --workspace "$WS" --flutter-version "$FLUTTER_VERSION"
           source "$WS/setup_env.sh"
 
-          emb -v cross "$RUNNER_TEMP/embedded-build/ivi-homescreen/rpi4-trixie.emb.yaml" \
+          emb -v cross "$RUNNER_TEMP/embedded-build/ivi-homescreen/$TARGET.emb.yaml" \
             --workspace "$WS" \
-            --target rpi4-trixie \
+            --target "$TARGET" \
             --backend wayland-egl \
             --app "$GITHUB_WORKSPACE" \
             --mode "$BUILD_MODE" \
             --build
 
-      - name: Package runnable bundle
+      - name: Package tar.gz and .deb
         run: |
           set -euo pipefail
 
@@ -145,14 +163,58 @@ jobs:
           EOF
           chmod +x "$RUNNABLE_DIR/run.sh"
 
-          PACKAGE="sigg_launcher-ivi-linux-arm64.tar.gz"
-          mkdir -p "$GITHUB_WORKSPACE/dist"
-          tar -C "$RUNNABLE_DIR" -czf "$GITHUB_WORKSPACE/dist/$PACKAGE" .
-          (cd "$GITHUB_WORKSPACE/dist" && sha256sum "$PACKAGE" > "$PACKAGE.sha256")
+          TAR_DIR="$GITHUB_WORKSPACE/dist/tar"
+          DEB_DIR="$GITHUB_WORKSPACE/dist/deb"
+          mkdir -p "$TAR_DIR" "$DEB_DIR"
 
-      - uses: actions/upload-artifact@v7
+          # ---- tar.gz ----
+          TARBALL="sigg_launcher-ivi-linux-arm64-$BOARD.tar.gz"
+          tar -C "$RUNNABLE_DIR" -czf "$TAR_DIR/$TARBALL" .
+
+          # ---- .deb ----
+          VERSION="$(sed -nE 's/^version:[[:space:]]*([^[:space:]+]+).*/\1/p' "$GITHUB_WORKSPACE/pubspec.yaml" | head -n1)"
+          VERSION="${VERSION:-0.0.0}-$GITHUB_RUN_NUMBER"
+          PKG="sigg-launcher-$BOARD"
+          ROOT="$RUNNER_TEMP/deb/$PKG"
+
+          mkdir -p "$ROOT/DEBIAN" "$ROOT/opt/sigg-launcher" "$ROOT/usr/bin"
+          cp -a "$RUNNABLE_DIR/." "$ROOT/opt/sigg-launcher/"
+
+          printf '#!/bin/sh\nexec /opt/sigg-launcher/run.sh "$@"\n' > "$ROOT/usr/bin/sigg-launcher"
+          chmod 755 "$ROOT/usr/bin/sigg-launcher"
+
+          cat > "$ROOT/DEBIAN/control" <<EOF
+          Package: $PKG
+          Version: $VERSION
+          Architecture: arm64
+          Maintainer: sigg_launcher CI <noreply@github.com>
+          Section: misc
+          Priority: optional
+          Installed-Size: $(du -sk "$ROOT/opt" | cut -f1)
+          Depends: libc6, libgbm1, libegl1, libgles2, libsystemd0, libsdl3-0, libwayland-client0, libwayland-cursor0, libwayland-egl1, libxkbcommon0
+          Provides: sigg-launcher
+          Conflicts: sigg-launcher
+          Description: sigg_launcher (ivi-homescreen) for Raspberry Pi ${BOARD#rpi}
+           Flutter launcher built for $TARGET (-mcpu=$CPU).
+          EOF
+
+          find "$ROOT" -type d -exec chmod 755 {} +
+          DEB="${PKG}_${VERSION}_arm64.deb"
+          dpkg-deb --root-owner-group --build "$ROOT" "$DEB_DIR/$DEB"
+          dpkg-deb --info "$DEB_DIR/$DEB"
+
+      - name: Upload tar.gz (unzipped)
+        uses: actions/upload-artifact@v7
         with:
-          name: sigg_launcher-ivi-linux-arm64
-          path: dist/sigg_launcher-ivi-linux-arm64.tar.gz*
+          path: dist/tar/*.tar.gz
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload .deb (unzipped)
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/deb/*.deb
+          archive: false
           if-no-files-found: error
           retention-days: 14
