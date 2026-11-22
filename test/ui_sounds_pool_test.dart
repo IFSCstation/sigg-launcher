@@ -1,9 +1,8 @@
-import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sigg_launcher/services/ui_sounds.dart';
 
-import 'fake_audio_handle.dart';
+import 'fake_soloud_backend.dart';
 
 Future<void> waitFor(bool Function() condition, {String? reason}) async {
   for (var i = 0; i < 200; i++) {
@@ -22,77 +21,69 @@ void main() {
     UiSounds.instance.debugReset();
   });
 
-  test('pool is preloaded once and reused round-robin', () async {
-    final factory = FakeAudioHandleFactory();
-    UiSounds.instance.debugReset(factory: factory.call);
+  test('source is loaded once and reused for every tick', () async {
+    final engine = FakeSoloudBackend();
+    UiSounds.instance.debugReset(engine: engine);
 
     for (var i = 0; i < 6; i++) {
       await UiSounds.instance.selectionChanged();
     }
 
-    expect(factory.created, hasLength(3));
-    expect(factory.created.map((handle) => handle.playCount), [2, 2, 2]);
-    for (final handle in factory.created) {
-      expect(handle.disposeCount, 0, reason: 'ticks must not dispose players');
-      expect(handle.sources, hasLength(1), reason: 'source is preloaded once');
-      expect(handle.releaseModes, [ReleaseMode.release]);
-      expect(handle.lastVolume, 1.0);
-    }
+    // One source load, six plays.
+    expect(engine.loadCalls.length, equals(1));
+    expect(engine.loadCalls.first.kind, 'asset');
+    expect(engine.loadCalls.first.path, 'sfx/click.wav');
+    expect(engine.playCalls.length, equals(6));
+    expect(engine.playCalls.every((call) => call.volume == 1.0), isTrue);
   });
 
-  test('volume is applied to every pooled player', () async {
-    final factory = FakeAudioHandleFactory();
-    UiSounds.instance.debugReset(factory: factory.call);
+  test('volume is applied to every new tick', () async {
+    final engine = FakeSoloudBackend();
+    UiSounds.instance.debugReset(engine: engine);
 
     await UiSounds.instance.selectionChanged();
     await UiSounds.instance.setVolume(0.4);
-    expect(factory.created.map((handle) => handle.lastVolume), [0.4, 0.4, 0.4]);
+    await UiSounds.instance.selectionChanged();
+    await UiSounds.instance.selectionChanged();
 
-    final calls = factory.created.fold<int>(
-      0,
-      (sum, handle) => sum + handle.volumes.length,
-    );
+    expect(engine.playCalls.map((c) => c.volume), [1.0, 0.4, 0.4]);
+
+    // Setting the same volume must not hit the engine again (no-op check
+    // happens in setVolume before any engine call).
     await UiSounds.instance.setVolume(0.4);
-    expect(
-      factory.created.fold<int>(0, (sum, h) => sum + h.volumes.length),
-      calls,
-      reason: 'unchanged volume must not hit the platform',
-    );
+    expect(engine.playCalls.length, equals(3), reason: 'unchanged volume must not add plays');
   });
 
   test(
-    'disabling disposes the pool and re-enabling rebuilds it lazily',
+    'disabling disposes the source and re-enabling reloads lazily',
     () async {
-      final factory = FakeAudioHandleFactory();
-      UiSounds.instance.debugReset(factory: factory.call);
+      final engine = FakeSoloudBackend();
+      UiSounds.instance.debugReset(engine: engine);
 
       await UiSounds.instance.selectionChanged();
-      final firstPool = List.of(factory.created);
-      expect(firstPool, hasLength(3));
+      expect(engine.loadCalls.length, equals(1));
+      expect(engine.disposedSourceIds, isEmpty);
 
       UiSounds.instance.setEnabled(false);
       await waitFor(
-        () => firstPool.every((handle) => handle.disposeCount == 1),
-        reason: 'pool was not disposed',
+        () => engine.disposedSourceIds.length == 1,
+        reason: 'source was not disposed',
       );
 
       await UiSounds.instance.selectionChanged();
-      expect(
-        factory.created,
-        hasLength(3),
-        reason: 'disabled pool must be idle',
-      );
+      expect(engine.loadCalls.length, equals(1),
+          reason: 'disabled source must be idle (no reload)');
 
       UiSounds.instance.setEnabled(true);
       await UiSounds.instance.selectionChanged();
-      expect(factory.created, hasLength(6));
-      expect(factory.created[3].playCount, 1);
+      expect(engine.loadCalls.length, equals(2));
+      expect(engine.playCalls.length, equals(2));
     },
   );
 
-  test('overlapping ticks use distinct pooled players', () async {
-    final factory = FakeAudioHandleFactory();
-    UiSounds.instance.debugReset(factory: factory.call);
+  test('overlapping ticks create distinct voices from the same source', () async {
+    final engine = FakeSoloudBackend();
+    UiSounds.instance.debugReset(engine: engine);
 
     await Future.wait([
       UiSounds.instance.selectionChanged(),
@@ -100,33 +91,28 @@ void main() {
       UiSounds.instance.selectionChanged(),
     ]);
 
-    expect(factory.created, hasLength(3));
-    expect(factory.created.map((handle) => handle.playCount), [
-      1,
-      1,
-      1,
-    ], reason: 'a tick must never reuse the player another tick is using');
+    expect(engine.loadCalls.length, equals(1),
+        reason: 'source must be loaded once, not per tick');
+    expect(engine.playCalls.length, equals(3),
+        reason: 'three ticks must create three voices');
+    expect(engine.playCalls.every((c) => c.sourceId == engine.playCalls.first.sourceId), isTrue,
+        reason: 'all voices must use the same source');
   });
 
-  test('plugin failure latches the effect off and disposes the pool', () async {
-    final factory = FakeAudioHandleFactory();
-    UiSounds.instance.debugReset(
-      factory: () {
-        final handle = factory();
-        handle.playError = MissingPluginException('no plugin');
-        return handle;
-      },
-    );
+  test('engine failure latches sound off', () async {
+    final engine = FakeSoloudBackend()
+      ..loadError = MissingPluginException('no plugin');
+    UiSounds.instance.debugReset(engine: engine);
 
     await UiSounds.instance.selectionChanged();
-    expect(factory.created, hasLength(3));
-    expect(factory.created.first.playCount, 1);
-    await waitFor(
-      () => factory.created.every((handle) => handle.disposeCount == 1),
-      reason: 'latched player pool was not disposed',
-    );
+    expect(engine.loadCalls.length, equals(1));
+    expect(engine.playCalls, isEmpty,
+        reason: 'play must not be attempted after load failure');
+    // No source was created, so nothing to dispose.
+    expect(engine.disposedSourceIds.length, equals(0));
 
     await UiSounds.instance.selectionChanged();
-    expect(factory.created, hasLength(3));
+    expect(engine.loadCalls.length, equals(1),
+        reason: 'latched engine must not reload');
   });
 }

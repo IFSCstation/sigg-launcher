@@ -1,60 +1,60 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
-import 'package:sigg_launcher/services/audio_handle.dart';
+import 'package:sigg_launcher/services/audio_log.dart';
+import 'package:sigg_launcher/services/soloud_backend.dart';
 
 /// Owns the single background-music pipeline.
 ///
-/// All mutations of the shared [AudioHandle] run through one serialized
-/// command chain: a command only starts after the previous one finished, so a
-/// stale request can never issue native calls that touch a newer track. The
-/// generation counter is only used to *abort* a command that has been
-/// superseded; it never authorizes cleanup of the shared player.
+/// One SoLoud [AudioSource] is loaded per track and played with native
+/// looping (`looping: true`), so the audio thread restarts the track on
+/// completion — no Dart-side re-entrant `Play()` path, which on Linux with
+/// `audioplayers` could throw inside a GStreamer bus callback and abort the
+/// process.
 ///
-/// Looping is driven from Dart (`onPlayerComplete` -> replay) instead of the
-/// plugin's `ReleaseMode.loop`. On Linux the native loop path re-enters
-/// `Play()` from a GStreamer bus callback with no exception handling, so a
-/// single state failure aborts the process; letting the media finish and
-/// issuing a fresh `play()` avoids that path entirely.
+/// All mutations run through one serialized command chain: a command only
+/// starts after the previous one finished, so a stale request can never issue
+/// native calls that touch a newer track. The generation counter aborts
+/// superseded commands before they touch native state.
+///
+/// Fades use SoLoud's native `fadeVolume()` on the audio thread instead of
+/// stepped Dart-side `setVolume` calls, so the UI isolate never blocks on
+/// per-step platform round-trips.
 class BgmPlayer {
   BgmPlayer._();
 
   static final BgmPlayer instance = BgmPlayer._();
 
-  static const Duration _fadeTick = Duration(milliseconds: 25);
+  /// The SoLoud engine. Inject a fake in tests via [debugReset].
+  SoloudBackend _engine = SoloudEngine.instance;
 
-  AudioHandleFactory _factory = AudioplayersHandle.new;
-  AudioHandle? _player;
-  StreamSubscription<void>? _completeSubscription;
+  int? _sourceId;        // loaded AudioSource for the current track
+  int? _voiceId;         // currently playing voice (or null if stopped)
+  String? _currentPath;  // path of the loaded/source track
+  String? _desiredPath;  // path the user last requested
 
   bool _unavailable = false;
   bool _enabled = true;
 
-  String? _currentPath;
-  String? _desiredPath;
   int _requestGeneration = 0;
-  int _fadeGeneration = 0;
   bool _trackActive = false;
-  double _currentVolume = 1.0;
   double _targetVolume = 1.0;
 
   Duration _fadeInDuration = const Duration(milliseconds: 400);
   Duration _fadeOutDuration = const Duration(milliseconds: 250);
 
-  /// Serializes every native call made against [_player].
+  /// Serializes every native call made against the engine.
   Future<void> _commands = Future<void>.value();
 
   @visibleForTesting
   String? debugLastRequested;
 
   @visibleForTesting
-  int debugPlayersCreated = 0;
+  int debugSourcesLoaded = 0;
 
   @visibleForTesting
-  int debugPlayersDisposed = 0;
+  int debugSourcesDisposed = 0;
 
   @visibleForTesting
   String? get debugCurrentPath => _currentPath;
@@ -62,9 +62,9 @@ class BgmPlayer {
   @visibleForTesting
   bool get debugTrackActive => _trackActive;
 
-  /// Silences the player (used by tests where no audio plugin exists). This
-  /// mirrors the permanent latched state that a first [MissingPluginException]
-  /// triggers in production.
+  /// Silences the player (used by tests where no audio plugin exists). Mirrors
+  /// the permanent latched state that a first engine failure triggers in
+  /// production.
   @visibleForTesting
   void debugDisable() {
     _unavailable = true;
@@ -72,37 +72,37 @@ class BgmPlayer {
     _desiredPath = null;
     _trackActive = false;
     _requestGeneration++;
-    _fadeGeneration++;
   }
 
   /// Restores the player to a pristine state and optionally injects a test
   /// backend. Commands already queued by a previous test are aborted by the
   /// generation bump.
   @visibleForTesting
-  void debugReset({AudioHandleFactory? factory}) {
-    _factory = factory ?? AudioplayersHandle.new;
+  void debugReset({SoloudBackend? engine}) {
+    _engine = engine ?? SoloudEngine.instance;
     _unavailable = false;
     _enabled = true;
     _currentPath = null;
     _desiredPath = null;
     _trackActive = false;
-    _currentVolume = 1.0;
     _targetVolume = 1.0;
     _fadeInDuration = const Duration(milliseconds: 400);
     _fadeOutDuration = const Duration(milliseconds: 250);
     _requestGeneration++;
-    _fadeGeneration++;
     debugLastRequested = null;
-    debugPlayersCreated = 0;
-    debugPlayersDisposed = 0;
+    debugSourcesLoaded = 0;
+    debugSourcesDisposed = 0;
 
-    final player = _player;
-    _player = null;
-    unawaited(_completeSubscription?.cancel());
-    _completeSubscription = null;
-    if (player != null) {
-      debugPlayersDisposed++;
-      unawaited(_disposeQuietly(player));
+    // Release any playing voice and loaded source under the old backend.
+    final voiceId = _voiceId;
+    final sourceId = _sourceId;
+    _voiceId = null;
+    _sourceId = null;
+    if (voiceId != null) {
+      unawaited(_engineStopVoice(voiceId));
+    }
+    if (sourceId != null) {
+      unawaited(_engineDisposeSource(sourceId));
     }
   }
 
@@ -128,7 +128,7 @@ class BgmPlayer {
   }
 
   /// Stops the current track. [fade] is false for call sites that must not
-  /// wait for the 250 ms fade (e.g. right before launching a game).
+  /// wait for the fade (e.g. right before launching a game).
   Future<void> stop({bool fade = true}) {
     _desiredPath = null;
     final generation = ++_requestGeneration;
@@ -139,13 +139,11 @@ class BgmPlayer {
   /// playing track; the preference is applied to the next [play] as well.
   Future<void> setVolume(double volume) async {
     _targetVolume = volume.clamp(0.0, 1.0).toDouble();
-    final player = _player;
-    if (_unavailable || player == null || !_trackActive) return;
+    if (_unavailable || !_trackActive || _voiceId == null) return;
     // Slider drags and held-key repeats can issue updates faster than a short
     // fade can finish. Cancel any in-flight fade and apply the current target
     // directly so the audible level follows the control without lagging behind.
-    _fadeGeneration++;
-    await _applyVolume(player, _targetVolume);
+    _engine.setVolume(_voiceId!, _targetVolume);
   }
 
   /// Enables or disables background music.
@@ -193,214 +191,112 @@ class BgmPlayer {
     if (!await file.exists()) return;
     if (generation != _requestGeneration) return;
 
-    final player = await _ensurePlayer();
-    if (player == null) return;
-
-    if (_trackActive) {
-      await _fadeTo(0.0, _fadeOutDuration, generation);
-      // A newer command is already queued behind this one and owns the
-      // player now. Return without stopping, fading or otherwise touching it.
-      if (generation != _requestGeneration) return;
-      _trackActive = false;
-    }
-
-    _currentPath = path;
-    try {
-      await player.setVolume(0.0);
-      if (generation != _requestGeneration) return;
-      _currentVolume = 0.0;
-
-      await player.play(DeviceFileSource(path));
+    // Load the source if this is a new track, or reuse the existing one.
+    if (_sourceId == null || _currentPath != path) {
+      // Dispose the previous source if we're switching tracks.
+      if (_sourceId != null) {
+        await _engine.disposeSource(_sourceId!);
+        debugSourcesDisposed++;
+        _sourceId = null;
+        _voiceId = null;
+      }
+      final sourceId = await _engine.loadFile(path);
       if (generation != _requestGeneration) {
-        // Same contract as above: the queued command will replace this source
-        // and fade in. Never stop the shared pipeline from a stale command.
+        // Stale: dispose the source we just loaded.
+        await _engine.disposeSource(sourceId);
+        debugSourcesDisposed++;
         return;
       }
+      _sourceId = sourceId;
+      _currentPath = path;
+      debugSourcesLoaded++;
+    }
 
+    // If a voice is still playing (e.g. crossfade), stop it first.
+    if (_voiceId != null) {
+      _engine.stop(_voiceId!);
+      _voiceId = null;
+      _trackActive = false;
+      if (generation != _requestGeneration) return;
+    }
+
+    try {
+      // Start the voice at 0 volume, then fade in to the target level on the
+      // audio thread. No stepped Dart-side volume updates needed.
+      final voiceId = _engine.play(_sourceId!, looping: true, volume: 0.0);
+      if (generation != _requestGeneration) {
+        // Stale: stop the voice we just started.
+        _engine.stop(voiceId);
+        return;
+      }
+      _voiceId = voiceId;
       _trackActive = true;
-      await _fadeTo(_targetVolume, _fadeInDuration, generation);
-    } on MissingPluginException catch (error, stackTrace) {
-      _unavailable = true;
-      logAudioError('bgm-play', error, stackTrace);
+
+      // Fade in to the target volume.
+      _engine.fadeVolume(voiceId, _targetVolume, _fadeInDuration);
     } catch (error, stackTrace) {
       logAudioError('bgm-play', error, stackTrace);
       if (generation == _requestGeneration) {
         _currentPath = null;
         _trackActive = false;
+        _voiceId = null;
       }
     }
   }
 
   Future<void> _stopCommand(int generation, {required bool fade}) async {
     if (generation != _requestGeneration) return;
-    if (fade && _trackActive) {
-      await _fadeTo(0.0, _fadeOutDuration, generation);
-      if (generation != _requestGeneration) return;
-    } else {
-      // A no-fade stop still needs to cancel a fade that is in flight.
-      _fadeGeneration++;
-    }
+    _desiredPath = null;
     _trackActive = false;
-    _currentPath = null;
 
-    final player = _player;
-    if (player == null) return;
-    try {
-      // `AudioPlayer.stop()` blocks the platform thread on Linux (it waits on
-      // a GStreamer state change with GST_CLOCK_TIME_NONE). Pause + seek keeps
-      // the same "restart from the beginning next time" semantics without
-      // that unbounded wait.
-      await player.pause();
-      await player.seek(Duration.zero);
-    } catch (error, stackTrace) {
-      logAudioError('bgm-stop', error, stackTrace);
+    if (fade && _voiceId != null) {
+      // Fade out on the audio thread, then stop after the fade duration.
+      _engine.fadeVolume(_voiceId!, 0.0, _fadeOutDuration);
+      await Future<void>.delayed(_fadeOutDuration);
+      if (generation != _requestGeneration) return;
     }
+
+    if (_voiceId != null) {
+      _engine.stop(_voiceId!);
+      _voiceId = null;
+    }
+    _currentPath = null;
   }
 
   Future<void> _disableCommand(int generation) async {
     if (generation != _requestGeneration) return;
-    await _fadeTo(0.0, _fadeOutDuration, generation);
-    if (generation != _requestGeneration) return;
+    if (_trackActive && _voiceId != null) {
+      _engine.fadeVolume(_voiceId!, 0.0, _fadeOutDuration);
+      await Future<void>.delayed(_fadeOutDuration);
+      if (generation != _requestGeneration) return;
+    }
     _trackActive = false;
     _currentPath = null;
-    _fadeGeneration++;
-    await _releasePlayer();
+
+    if (_voiceId != null) {
+      _engine.stop(_voiceId!);
+      _voiceId = null;
+    }
+    if (_sourceId != null) {
+      await _engine.disposeSource(_sourceId!);
+      debugSourcesDisposed++;
+      _sourceId = null;
+    }
   }
 
-  Future<AudioHandle?> _ensurePlayer() async {
-    final existing = _player;
-    if (existing != null) return existing;
-    AudioHandle? created;
+  Future<void> _engineStopVoice(int voiceId) async {
     try {
-      final player = _factory();
-      created = player;
-      debugPlayersCreated++;
-      _completeSubscription = player.onPlayerComplete.listen(
-        (_) => _onPlayerComplete(player),
-        onError: (Object error, StackTrace stackTrace) =>
-            logAudioError('bgm-events', error, stackTrace),
-      );
-      // Release mode (not loop): on Linux the native loop handler re-enters
-      // Play() from the bus watch without exception handling. Dart restarts
-      // the track on completion instead.
-      await player.setReleaseMode(ReleaseMode.release);
-      await player.setVolume(_currentVolume);
-      _player = player;
-      return player;
-    } on MissingPluginException catch (error, stackTrace) {
-      _unavailable = true;
-      logAudioError('bgm-create', error, stackTrace);
-      await _abandonPlayer(created);
-      return null;
+      _engine.stop(voiceId);
     } catch (error, stackTrace) {
-      logAudioError('bgm-create', error, stackTrace);
-      await _abandonPlayer(created);
-      return null;
+      logAudioError('bgm-stop-voice', error, stackTrace);
     }
   }
 
-  /// Releases a player whose construction failed before it became [_player].
-  Future<void> _abandonPlayer(AudioHandle? player) async {
-    if (player == null) return;
-    final subscription = _completeSubscription;
-    _completeSubscription = null;
-    await subscription?.cancel();
-    await _disposeQuietly(player);
-  }
-
-  void _onPlayerComplete(AudioHandle player) {
-    if (_unavailable || !_enabled) return;
-    if (!identical(player, _player)) return;
-    // A stray completion from a source that has already been replaced, or a
-    // stop that has been requested but not executed yet. [_desiredPath] is
-    // updated synchronously at request time, so it is the authoritative
-    // "should anything be playing" signal here.
-    if (!_trackActive || _currentPath == null) return;
-    if (_desiredPath != _currentPath) return;
-
-    _trackActive = false;
-    unawaited(_enqueuePlay(_currentPath!));
-  }
-
-  Future<void> _releasePlayer() async {
-    final player = _player;
-    _player = null;
-    final subscription = _completeSubscription;
-    _completeSubscription = null;
-    await subscription?.cancel();
-    if (player == null) return;
-    debugPlayersDisposed++;
+  Future<void> _engineDisposeSource(int sourceId) async {
     try {
-      await player.setReleaseMode(ReleaseMode.release);
+      await _engine.disposeSource(sourceId);
     } catch (error, stackTrace) {
-      logAudioError('bgm-release', error, stackTrace);
+      logAudioError('bgm-dispose-source', error, stackTrace);
     }
-    try {
-      await player.pause();
-    } catch (error, stackTrace) {
-      logAudioError('bgm-release', error, stackTrace);
-    }
-    await _disposeQuietly(player);
-  }
-
-  Future<void> _disposeQuietly(AudioHandle player) async {
-    try {
-      await player.dispose();
-    } catch (error, stackTrace) {
-      logAudioError('bgm-dispose', error, stackTrace);
-    }
-  }
-
-  Future<void> _applyVolume(AudioHandle player, double value) async {
-    try {
-      await player.setVolume(value);
-      _currentVolume = value;
-    } on MissingPluginException catch (error, stackTrace) {
-      _unavailable = true;
-      logAudioError('bgm-volume', error, stackTrace);
-    } catch (error, stackTrace) {
-      logAudioError('bgm-volume', error, stackTrace);
-    }
-  }
-
-  /// Wall-clock fade. Unlike a fixed step count, this always lands on
-  /// [target] after roughly [duration] even when platform calls are slow, and
-  /// issues at most one `setVolume` per [_fadeTick].
-  Future<void> _fadeTo(double target, Duration duration, int generation) async {
-    final player = _player;
-    if (player == null) {
-      _currentVolume = target;
-      return;
-    }
-
-    final fadeId = ++_fadeGeneration;
-    if (duration <= Duration.zero) {
-      await _applyVolume(player, target);
-      return;
-    }
-
-    final start = _currentVolume;
-    if ((target - start).abs() < 0.001) {
-      _currentVolume = target;
-      return;
-    }
-
-    final clock = Stopwatch()..start();
-    final totalMicros = duration.inMicroseconds;
-    while (true) {
-      if (generation != _requestGeneration || fadeId != _fadeGeneration) return;
-      final progress = (clock.elapsedMicroseconds / totalMicros).clamp(
-        0.0,
-        1.0,
-      );
-      final value = start + (target - start) * progress;
-      if ((value - _currentVolume).abs() >= 0.001) {
-        await _applyVolume(player, value);
-      }
-      if (progress >= 1.0) break;
-      if (generation != _requestGeneration || fadeId != _fadeGeneration) return;
-      await Future<void>.delayed(_fadeTick);
-    }
-    _currentVolume = target;
   }
 }

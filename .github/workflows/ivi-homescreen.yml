@@ -103,12 +103,9 @@ jobs:
                   DISABLE_PLUGINS: 'OFF'
                   PLUGINS_DIR: '../ivi-homescreen-plugins/plugins'
                   BUILD_PLUGIN_GAMEPADS_LINUX: 'ON'
-                  BUILD_PLUGIN_AUDIOPLAYERS_LINUX: 'ON'
                 sysroot:
                   dev_packages:
                     - libsdl3-dev
-                    - libgstreamer1.0-dev
-                    - libgstreamer-plugins-base1.0-dev
                 backends:
                   wayland-egl:
                     BUILD_BACKEND_WAYLAND_EGL: 'ON'

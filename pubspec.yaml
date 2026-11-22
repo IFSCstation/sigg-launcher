@@ -8,9 +8,9 @@ environment:
 
 dependencies:
   archive: ^4.6.0
-  audioplayers: ^6.8.1
   flutter:
     sdk: flutter
+  flutter_soloud: ^5.3.2
   gamepads: ^0.1.11
 
 dev_dependencies:

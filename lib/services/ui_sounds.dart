@@ -1,9 +1,8 @@
 import 'dart:async';
 
-import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
-import 'package:sigg_launcher/services/audio_handle.dart';
+import 'package:sigg_launcher/services/audio_log.dart';
+import 'package:sigg_launcher/services/soloud_backend.dart';
 
 /// Plays the short UI "selection changed" tick (XMB-style), fired by
 /// keyboard/gamepad navigation whenever the focused item moves.
@@ -13,65 +12,64 @@ import 'package:sigg_launcher/services/audio_handle.dart';
 /// release mode. It is best-effort — plugin failures permanently disable it
 /// so navigation never breaks on sound.
 ///
-/// The tick uses a small round-robin pool of players that are created and
-/// preloaded once. Creating and disposing a native pipeline per keypress was
-/// the single most expensive audio operation in the app: each tick built a
-/// GStreamer playbin/sink, extracted the asset, played it, and then ran a
-/// blocking `ReleaseMediaSource()` on the platform thread. The pool pays that
-/// cost once and reuses the pipelines, so auto-repeat (a tick every ~120 ms)
-/// never touches player creation.
+/// The click [AudioSource] is loaded once into memory and reused for every
+/// tick. Overlapping ticks (e.g. gamepad auto-repeat at ~8 Hz) create
+/// multiple simultaneous voices from the same source — no source creation or
+/// disposal per tick, which was the single most expensive audio operation
+/// under `audioplayers`.
+///
+/// A shared load future ensures that rapid, overlapping `selectionChanged()`
+/// calls trigger exactly one `loadAsset` — subsequent calls await the same
+/// future instead of each starting their own load.
 class UiSounds {
   UiSounds._();
 
   static final UiSounds instance = UiSounds._();
 
-  static const int _poolSize = 3;
-  static final AssetSource _tickSource = AssetSource('sfx/click.wav');
+  /// The SoLoud engine. Inject a fake in tests via [debugReset].
+  SoloudBackend _engine = SoloudEngine.instance;
 
-  AudioHandleFactory _factory = AudioplayersHandle.new;
-  final List<AudioHandle> _pool = [];
-  Future<void>? _poolReady;
-  int _next = 0;
+  int? _tickSourceId;
+  Future<int>? _tickSourceLoadFuture;
 
   bool _unavailable = false;
   bool _enabled = true;
   double _volume = 1.0;
 
   @visibleForTesting
-  int debugPlayersCreated = 0;
+  int debugSourcesLoaded = 0;
 
   @visibleForTesting
-  int debugPlayersDisposed = 0;
+  int debugSourcesDisposed = 0;
 
   bool get enabled => _enabled;
 
   double get volume => _volume;
 
   /// Silences the player (used by tests where no audio plugin exists). Mirrors
-  /// the permanent latched state a first [MissingPluginException] triggers.
+  /// the permanent latched state an engine failure triggers in production.
   @visibleForTesting
   void debugDisable() {
     _unavailable = true;
-    unawaited(_disposePool());
+    unawaited(_disposeSource());
   }
 
   @visibleForTesting
-  void debugReset({AudioHandleFactory? factory}) {
-    _factory = factory ?? AudioplayersHandle.new;
+  void debugReset({SoloudBackend? engine}) {
+    _engine = engine ?? SoloudEngine.instance;
     _unavailable = false;
     _enabled = true;
     _volume = 1.0;
-    _next = 0;
-    debugPlayersCreated = 0;
-    debugPlayersDisposed = 0;
-    unawaited(_disposePool());
+    debugSourcesLoaded = 0;
+    debugSourcesDisposed = 0;
+    unawaited(_disposeSource());
   }
 
   void setEnabled(bool enabled) {
     if (_enabled == enabled) return;
     _enabled = enabled;
     if (!enabled) {
-      unawaited(_disposePool());
+      unawaited(_disposeSource());
     }
   }
 
@@ -79,97 +77,48 @@ class UiSounds {
     final next = volume.clamp(0.0, 1.0).toDouble();
     if (_volume == next) return;
     _volume = next;
-    for (final player in List<AudioHandle>.of(_pool)) {
-      try {
-        await player.setVolume(next);
-      } on MissingPluginException catch (error, stackTrace) {
-        _unavailable = true;
-        logAudioError('ui-volume', error, stackTrace);
-        return;
-      } catch (error, stackTrace) {
-        logAudioError('ui-volume', error, stackTrace);
-      }
-    }
+    // The tick source is shared across all voices; volume applies to new
+    // playback. Already-playing voices keep their volume until they end.
   }
 
   Future<void> selectionChanged() async {
     if (_unavailable || !_enabled) return;
     try {
-      if (!await _ensurePool()) return;
-      final player = _pool[_next % _pool.length];
-      _next = (_next + 1) % _pool.length;
-      await player.play(_tickSource);
-    } on MissingPluginException catch (error, stackTrace) {
-      _unavailable = true;
-      logAudioError('ui-sound', error, stackTrace);
-      await _disposePool();
+      final sourceId = await _ensureTickSource();
+      if (_unavailable) return;
+      _engine.play(sourceId, volume: _volume);
     } catch (error, stackTrace) {
       logAudioError('ui-sound', error, stackTrace);
-    }
-  }
-
-  Future<bool> _ensurePool() async {
-    if (_unavailable) return false;
-    final ready = _poolReady ??= _buildPool();
-    try {
-      await ready;
-    } catch (error, stackTrace) {
-      logAudioError('ui-pool', error, stackTrace);
-      _poolReady = null;
-      return false;
-    }
-    return !_unavailable && _pool.isNotEmpty;
-  }
-
-  Future<void> _buildPool() async {
-    final created = <AudioHandle>[];
-    try {
-      for (var i = 0; i < _poolSize; i++) {
-        final player = _factory();
-        created.add(player);
-        debugPlayersCreated++;
-        try {
-          // Release mode: after the blip ends the plugin releases the media
-          // source, so the next `play()` re-prepares it instead of resuming a
-          // pipeline stuck at EOS (the Linux stale-EOS failure mode).
-          await player.setReleaseMode(ReleaseMode.release);
-          await player.setVolume(_volume);
-          await player.setSource(_tickSource);
-        } on MissingPluginException {
-          rethrow;
-        } catch (error, stackTrace) {
-          // Preload is best-effort; the player can still be played later.
-          logAudioError('ui-preload', error, stackTrace);
-        }
-      }
-      if (_unavailable) {
-        await _disposeHandles(created);
-        return;
-      }
-      _pool.addAll(created);
-    } on MissingPluginException catch (error, stackTrace) {
       _unavailable = true;
-      logAudioError('ui-preload', error, stackTrace);
-      await _disposeHandles(created);
+      await _disposeSource();
     }
   }
 
-  Future<void> _disposePool() async {
-    _poolReady = null;
-    _next = 0;
-    final handles = List<AudioHandle>.of(_pool);
-    _pool.clear();
-    await _disposeHandles(handles);
+  /// Ensures the click source is loaded, sharing a single load future across
+  /// concurrent callers so rapid overlapping ticks trigger exactly one load.
+  Future<int> _ensureTickSource() async {
+    if (_tickSourceId != null) return _tickSourceId!;
+    _tickSourceLoadFuture ??= _engine.loadAsset('sfx/click.wav');
+    final loadFuture = _tickSourceLoadFuture!;
+    try {
+      final sourceId = await loadFuture;
+      _tickSourceId = sourceId;
+      return sourceId;
+    } finally {
+      _tickSourceLoadFuture = null;
+    }
   }
 
-  Future<void> _disposeHandles(List<AudioHandle> handles) async {
-    for (final player in handles) {
-      debugPlayersDisposed++;
-      try {
-        await player.dispose();
-      } catch (error, stackTrace) {
-        logAudioError('ui-dispose', error, stackTrace);
-      }
+  Future<void> _disposeSource() async {
+    final sourceId = _tickSourceId;
+    _tickSourceId = null;
+    _tickSourceLoadFuture = null;
+    if (sourceId == null) return;
+    try {
+      await _engine.disposeSource(sourceId);
+      debugSourcesDisposed++;
+    } catch (error, stackTrace) {
+      logAudioError('ui-dispose-source', error, stackTrace);
     }
   }
 }

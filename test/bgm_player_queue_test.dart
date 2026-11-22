@@ -5,15 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sigg_launcher/services/bgm_player.dart';
 
-import 'fake_audio_handle.dart';
-
-Future<void> waitFor(bool Function() condition, {String? reason}) async {
-  for (var i = 0; i < 200; i++) {
-    if (condition()) return;
-    await Future<void>.delayed(const Duration(milliseconds: 2));
-  }
-  fail(reason ?? 'condition was not met in time');
-}
+import 'fake_soloud_backend.dart';
 
 void main() {
   late Directory tempDir;
@@ -45,12 +37,8 @@ void main() {
   });
 
   test('rapid switches only play the last requested track', () async {
-    final factory = FakeAudioHandleFactory();
-    BgmPlayer.instance.debugReset(factory: factory.call);
-    BgmPlayer.instance.debugSetFadeDurations(
-      fadeIn: Duration.zero,
-      fadeOut: Duration.zero,
-    );
+    final engine = FakeSoloudBackend();
+    BgmPlayer.instance.debugReset(engine: engine);
 
     await Future.wait([
       BgmPlayer.instance.play(trackA),
@@ -58,183 +46,131 @@ void main() {
       BgmPlayer.instance.play(trackC),
     ]);
 
-    expect(factory.created, hasLength(1));
-    expect(
-      factory.last.played,
-      hasLength(1),
-      reason: 'superseded requests must not touch the shared player',
-    );
-    expect(deviceFileName(factory.last.played.single), trackC);
+    // Only one source should be loaded (for trackC; A and B were superseded).
+    expect(engine.loadCalls, hasLength(1));
+    expect(engine.lastPlayedSource, trackC);
     expect(BgmPlayer.instance.debugCurrentPath, trackC);
     expect(BgmPlayer.instance.debugTrackActive, isTrue);
   });
 
   test('a stale request cannot stop or replace the newer track', () async {
-    final handle = FakeAudioHandle();
+    final engine = FakeSoloudBackend();
     final gate = Completer<void>();
-    handle.playGate = gate;
-    BgmPlayer.instance.debugReset(factory: () => handle);
-    BgmPlayer.instance.debugSetFadeDurations(
-      fadeIn: Duration.zero,
-      fadeOut: Duration.zero,
-    );
+    engine.playGate = gate;
+    BgmPlayer.instance.debugReset(engine: engine);
 
     final first = BgmPlayer.instance.play(trackA);
-    await waitFor(() => handle.playCount == 1, reason: 'A never started');
+    await waitFor(() => engine.playCalls.isNotEmpty, reason: 'A never started');
 
     final second = BgmPlayer.instance.play(trackB);
     gate.complete();
-    handle.playGate = null;
+    engine.playGate = null;
     await Future.wait([first, second]);
 
-    expect(handle.played.map(deviceFileName), [trackA, trackB]);
-    expect(handle.pauseCount, 0, reason: 'stale A must not pause B');
-    expect(handle.stopCount, 0, reason: 'stale A must not stop B');
-    expect(handle.disposeCount, 0);
+    // B's play replaced A's; A's stale command must not stop B's voice.
+    expect(engine.stopCalls, isEmpty, reason: 'stale A must not stop B');
     expect(BgmPlayer.instance.debugCurrentPath, trackB);
     expect(BgmPlayer.instance.debugTrackActive, isTrue);
   });
 
   test('stop cancels a queued play before it reaches the player', () async {
-    final factory = FakeAudioHandleFactory();
-    BgmPlayer.instance.debugReset(factory: factory.call);
+    final engine = FakeSoloudBackend();
+    BgmPlayer.instance.debugReset(engine: engine);
 
     final first = BgmPlayer.instance.play(trackA);
     final stopped = BgmPlayer.instance.stop();
     await Future.wait([first, stopped]);
 
-    expect(factory.created, isEmpty);
+    expect(engine.loadCalls, isEmpty);
     expect(BgmPlayer.instance.debugCurrentPath, isNull);
     expect(BgmPlayer.instance.debugTrackActive, isFalse);
   });
 
   test('stop during an in-flight play leaves no active track', () async {
-    final handle = FakeAudioHandle();
+    final engine = FakeSoloudBackend();
     final gate = Completer<void>();
-    handle.playGate = gate;
-    BgmPlayer.instance.debugReset(factory: () => handle);
-    BgmPlayer.instance.debugSetFadeDurations(
-      fadeIn: Duration.zero,
-      fadeOut: Duration.zero,
-    );
+    engine.playGate = gate;
+    BgmPlayer.instance.debugReset(engine: engine);
 
     final playing = BgmPlayer.instance.play(trackA);
-    await waitFor(() => handle.playCount == 1, reason: 'play never started');
+    await waitFor(() => engine.playCalls.isNotEmpty, reason: 'play never started');
 
     final stopping = BgmPlayer.instance.stop();
     gate.complete();
-    handle.playGate = null;
+    engine.playGate = null;
     await Future.wait([playing, stopping]);
 
     expect(BgmPlayer.instance.debugCurrentPath, isNull);
     expect(BgmPlayer.instance.debugTrackActive, isFalse);
-    expect(handle.pauseCount, 1);
+    expect(engine.stopCalls, hasLength(1));
   });
 
-  test('track completion restarts the current track from Dart', () async {
-    final factory = FakeAudioHandleFactory();
-    BgmPlayer.instance.debugReset(factory: factory.call);
-    BgmPlayer.instance.debugSetFadeDurations(
-      fadeIn: Duration.zero,
-      fadeOut: Duration.zero,
-    );
+  test('disabling releases the pipeline and enabling replays the selection', () async {
+    final engine = FakeSoloudBackend();
+    BgmPlayer.instance.debugReset(engine: engine);
 
     await BgmPlayer.instance.play(trackA);
-    expect(factory.last.playCount, 1);
-
-    factory.last.complete();
-    await waitFor(
-      () => factory.last.playCount == 2,
-      reason: 'completion did not restart the loop',
-    );
-
-    expect(deviceFileName(factory.last.played.last), trackA);
+    expect(engine.loadCalls, hasLength(1));
     expect(BgmPlayer.instance.debugTrackActive, isTrue);
-    expect(factory.last.disposeCount, 0);
-  });
 
-  test('completion after stop does not restart playback', () async {
-    final factory = FakeAudioHandleFactory();
-    BgmPlayer.instance.debugReset(factory: factory.call);
-    BgmPlayer.instance.debugSetFadeDurations(
-      fadeIn: Duration.zero,
-      fadeOut: Duration.zero,
-    );
-
-    await BgmPlayer.instance.play(trackA);
-    await BgmPlayer.instance.stop();
-    final playsAfterStop = factory.last.playCount;
-
-    factory.last.complete();
-    await Future<void>.delayed(const Duration(milliseconds: 30));
-
-    expect(factory.last.playCount, playsAfterStop);
+    await BgmPlayer.instance.setEnabled(false);
+    expect(engine.stopCalls, hasLength(1));
+    expect(engine.disposedSourceIds, hasLength(1));
+    expect(BgmPlayer.instance.debugCurrentPath, isNull);
     expect(BgmPlayer.instance.debugTrackActive, isFalse);
+
+    // A selection change while music is off is remembered, not played.
+    await BgmPlayer.instance.play(trackB);
+    expect(engine.loadCalls, hasLength(1), reason: 'disabled play must not load');
+    expect(engine.playCalls, hasLength(1)); // only trackA was played
+
+    await BgmPlayer.instance.setEnabled(true);
+    expect(engine.loadCalls, hasLength(2));
+    expect(engine.playCalls, hasLength(2)); // trackA and trackB played
+    expect(engine.lastPlayedSource, trackB);
   });
-
-  test(
-    'disabling releases the pipeline and enabling replays the selection',
-    () async {
-      final factory = FakeAudioHandleFactory();
-      BgmPlayer.instance.debugReset(factory: factory.call);
-      BgmPlayer.instance.debugSetFadeDurations(
-        fadeIn: Duration.zero,
-        fadeOut: Duration.zero,
-      );
-
-      await BgmPlayer.instance.play(trackA);
-      expect(factory.created, hasLength(1));
-
-      await BgmPlayer.instance.setEnabled(false);
-      expect(factory.last.disposeCount, 1);
-      expect(BgmPlayer.instance.debugCurrentPath, isNull);
-      expect(BgmPlayer.instance.debugTrackActive, isFalse);
-
-      // A selection change while music is off is remembered, not played.
-      await BgmPlayer.instance.play(trackB);
-      expect(factory.created, hasLength(1));
-      expect(factory.last.playCount, 1);
-
-      await BgmPlayer.instance.setEnabled(true);
-      expect(factory.created, hasLength(2));
-      expect(deviceFileName(factory.last.played.single), trackB);
-    },
-  );
 
   test('plugin failures latch audio off instead of escaping', () async {
-    final handle = FakeAudioHandle()
-      ..playError = MissingPluginException('no plugin');
-    BgmPlayer.instance.debugReset(factory: () => handle);
-    BgmPlayer.instance.debugSetFadeDurations(
-      fadeIn: Duration.zero,
-      fadeOut: Duration.zero,
-    );
+    final engine = FakeSoloudBackend()
+      ..loadError = MissingPluginException('no plugin');
+    BgmPlayer.instance.debugReset(engine: engine);
 
     await BgmPlayer.instance.play(trackA);
     expect(BgmPlayer.instance.debugTrackActive, isFalse);
 
     await BgmPlayer.instance.play(trackB);
-    expect(handle.playCount, 1, reason: 'the second request must be ignored');
+    expect(engine.playCalls, isEmpty, reason: 'the second request must be ignored');
   });
 
-  test('fade is wall-clock based and bounded in channel calls', () async {
-    final factory = FakeAudioHandleFactory();
-    BgmPlayer.instance.debugReset(factory: factory.call);
+  test('native fade calls fadeVolume once per fade, no stepped updates', () async {
+    final engine = FakeSoloudBackend();
+    BgmPlayer.instance.debugReset(engine: engine);
     BgmPlayer.instance.debugSetFadeDurations(
       fadeIn: const Duration(milliseconds: 120),
       fadeOut: Duration.zero,
     );
 
-    final clock = Stopwatch()..start();
     await BgmPlayer.instance.play(trackA);
-    clock.stop();
 
-    expect(clock.elapsedMilliseconds, greaterThanOrEqualTo(80));
-    expect(factory.last.lastVolume, 1.0);
+    // One fadeVolume call for the fade-in (0 -> target volume).
+    expect(engine.fadeCalls, hasLength(1));
+    expect(engine.fadeCalls.first.to, 1.0);
+  });
+
+  test('track switching disposes the previous source', () async {
+    final engine = FakeSoloudBackend();
+    BgmPlayer.instance.debugReset(engine: engine);
+
+    await BgmPlayer.instance.play(trackA);
+    expect(engine.loadCalls, hasLength(1));
     expect(
-      factory.last.volumes.length,
-      lessThan(15),
-      reason: 'a 120 ms fade must not issue one call per frame',
+      engine.loadCalls.where((c) => c.kind == 'file').length,
+      1,
     );
+
+    await BgmPlayer.instance.play(trackB);
+    expect(engine.loadCalls, hasLength(2));
+    expect(engine.disposedSourceIds, contains(0)); // source 0 (trackA) disposed
+    expect(BgmPlayer.instance.debugCurrentPath, trackB);
   });
 }
