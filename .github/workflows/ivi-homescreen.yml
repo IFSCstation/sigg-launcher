@@ -1,10 +1,14 @@
 name: Build Linux ARM64 (ivi-homescreen)
 
 concurrency:
-  group: build-linux-arm64
-  cancel-in-progress: false
+  group: build-linux-arm64-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 on:
+  push:
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
   workflow_dispatch:
     inputs:
       flutter-version:
@@ -19,7 +23,7 @@ on:
         options: [release, profile]
       launcher-args:
         description: Runtime arguments baked into run.sh
-        default: ''
+        default: '--fullscreen'
 
 permissions:
   contents: read
@@ -42,9 +46,9 @@ jobs:
             cpu: cortex-a76
 
     env:
-      FLUTTER_VERSION: ${{ inputs.flutter-version }}
-      BUILD_MODE: ${{ inputs.build-mode }}
-      LAUNCHER_ARGS: ${{ inputs.launcher-args }}
+      FLUTTER_VERSION: ${{ inputs.flutter-version || '3.47.7' }}
+      BUILD_MODE: ${{ inputs.build-mode || 'release' }}
+      LAUNCHER_ARGS: ${{ github.event_name == 'push' && '--fullscreen' || inputs.launcher-args }}
       BOARD: ${{ matrix.board }}
       TARGET: ${{ matrix.target }}
       CPU: ${{ matrix.cpu }}
