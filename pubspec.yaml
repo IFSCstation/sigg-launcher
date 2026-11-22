@@ -10,7 +10,8 @@ dependencies:
   archive: ^4.6.0
   flutter:
     sdk: flutter
-  flutter_soloud: ^5.3.2
+  flutter_soloud:
+    path: ./tool/flutter_soloud_patch
   gamepads: ^0.1.11
 
 dev_dependencies:
