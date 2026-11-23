@@ -92,16 +92,21 @@ class SoloudEngine implements SoloudBackend {
     bool lowLatency = true,
   }) async {
     if (_initialized || _failed) return;
-    logAudioInfo('soloud-init',
-        'initializing SoLoud (sampleRate=$sampleRate, bufferSize=$bufferSize, '
-        'channels=stereo, lowLatency=$lowLatency)');
+    logAudioInfo(
+      'soloud-init',
+      'initializing SoLoud (sampleRate=$sampleRate, bufferSize=$bufferSize, '
+          'channels=stereo, lowLatency=$lowLatency, backend=pulseAudio)',
+    );
+
     try {
       await SoLoud.instance.init(
         sampleRate: sampleRate,
         bufferSize: bufferSize,
         channels: Channels.stereo,
         lowLatency: lowLatency,
+        linuxAudioBackend: LinuxAudioBackend.pulseAudio,
       );
+
       _initialized = true;
       logAudioInfo('soloud-init', 'SoLoud engine initialized successfully');
     } catch (error, stackTrace) {
@@ -115,7 +120,8 @@ class SoloudEngine implements SoloudBackend {
   Future<int> loadFile(String path) async {
     if (_failed) {
       throw StateError(
-          'SoloudEngine initialization failed: $_initError; audio is unavailable');
+        'SoloudEngine initialization failed: $_initError; audio is unavailable',
+      );
     }
     if (!_initialized) {
       throw StateError('SoloudEngine not initialized');
@@ -128,7 +134,8 @@ class SoloudEngine implements SoloudBackend {
   Future<int> loadAsset(String key) async {
     if (_failed) {
       throw StateError(
-          'SoloudEngine initialization failed: $_initError; audio is unavailable');
+        'SoloudEngine initialization failed: $_initError; audio is unavailable',
+      );
     }
     if (!_initialized) {
       throw StateError('SoloudEngine not initialized');
