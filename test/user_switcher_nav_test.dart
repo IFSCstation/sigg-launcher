@@ -49,7 +49,7 @@ void main() {
 
   Future<void> pumpLibrary(
     WidgetTester tester, [
-    Stream<NormalizedGamepadEvent>? events,
+    Stream<GamepadEvent>? events,
   ]) async {
     await tester.binding.setSurfaceSize(const Size(1280, 720));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -58,7 +58,11 @@ void main() {
         debugShowCheckedModeBanner: false,
         theme: theme,
         navigatorObservers: [LauncherRouteObserver.instance],
-        home: Library(games: Future.value(mockGames), gamepadEvents: events),
+        home: Library(
+          games: Future.value(mockGames),
+          gamepadEvents: events,
+          gamepadLayout: GamepadKeyLayout.sdl3,
+        ),
       ),
     );
     await settle(tester);
@@ -74,7 +78,7 @@ void main() {
 
   Future<void> tapGamepad(
     WidgetTester tester,
-    StreamController<NormalizedGamepadEvent> ctrl,
+    StreamController<GamepadEvent> ctrl,
     GamepadButton button,
   ) async {
     ctrl.add(buttonEvent(button, 1));
@@ -238,7 +242,7 @@ void main() {
   testWidgets('gamepad d-pad/A select a profile and B backs out unchanged', (
     tester,
   ) async {
-    final ctrl = StreamController<NormalizedGamepadEvent>.broadcast();
+    final ctrl = StreamController<GamepadEvent>.broadcast();
     addTearDown(ctrl.close);
     await pumpLibrary(tester, ctrl.stream);
 

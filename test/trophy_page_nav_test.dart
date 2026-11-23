@@ -81,8 +81,8 @@ Future<void> _settle(WidgetTester tester, [int rounds = 6]) async {
 
 Future<void> _press(
   WidgetTester tester,
-  StreamController<NormalizedGamepadEvent> ctrl,
-  NormalizedGamepadEvent event,
+  StreamController<GamepadEvent> ctrl,
+  GamepadEvent event,
 ) async {
   ctrl.add(event);
   await tester.pump();
@@ -90,7 +90,7 @@ Future<void> _press(
 
 Future<void> _tap(
   WidgetTester tester,
-  StreamController<NormalizedGamepadEvent> ctrl,
+  StreamController<GamepadEvent> ctrl,
   GamepadButton button,
 ) async {
   await _press(tester, ctrl, buttonEvent(button, 1));
@@ -111,7 +111,7 @@ void main() {
 
   Future<GamepadNavBridge> pumpTrophies(
     WidgetTester tester,
-    Stream<NormalizedGamepadEvent> events,
+    Stream<GamepadEvent> events,
   ) async {
     final navKey = GlobalKey<NavigatorState>();
     // The app viewport is fixed at 1280x720 (GTK header shrinks it slightly);
@@ -127,7 +127,10 @@ void main() {
         home: const Scaffold(body: SizedBox()),
       ),
     );
-    final bridge = GamepadNavBridge(events: events);
+    final bridge = GamepadNavBridge(
+      events: events,
+      layout: GamepadKeyLayout.sdl3,
+    );
     addTearDown(bridge.dispose);
     navKey.currentState!.push(
       MaterialPageRoute(
@@ -143,7 +146,7 @@ void main() {
 
   testWidgets('d-pad moves game-card focus in the trophies index and A opens '
       'the focused game', (tester) async {
-    final ctrl = StreamController<NormalizedGamepadEvent>.broadcast();
+    final ctrl = StreamController<GamepadEvent>.broadcast();
     addTearDown(ctrl.close);
     await pumpTrophies(tester, ctrl.stream);
 
@@ -170,7 +173,7 @@ void main() {
 
   testWidgets('d-pad moves through the trophy row, A is inert, B returns to '
       'the previous list keeping focus', (tester) async {
-    final ctrl = StreamController<NormalizedGamepadEvent>.broadcast();
+    final ctrl = StreamController<GamepadEvent>.broadcast();
     addTearDown(ctrl.close);
     await pumpTrophies(tester, ctrl.stream);
 
@@ -204,7 +207,7 @@ void main() {
 
   testWidgets('gamepad moves never leak into the home shell while a trophies '
       'page is open', (tester) async {
-    final ctrl = StreamController<NormalizedGamepadEvent>.broadcast();
+    final ctrl = StreamController<GamepadEvent>.broadcast();
     addTearDown(ctrl.close);
     await pumpTrophies(tester, ctrl.stream);
 
@@ -225,7 +228,7 @@ void main() {
   });
 
   testWidgets('holding down repeats the move on a page list', (tester) async {
-    final ctrl = StreamController<NormalizedGamepadEvent>.broadcast();
+    final ctrl = StreamController<GamepadEvent>.broadcast();
     addTearDown(ctrl.close);
     await pumpTrophies(tester, ctrl.stream);
 
@@ -241,7 +244,7 @@ void main() {
   });
 
   testWidgets('holding right repeats across the trophy row', (tester) async {
-    final ctrl = StreamController<NormalizedGamepadEvent>.broadcast();
+    final ctrl = StreamController<GamepadEvent>.broadcast();
     addTearDown(ctrl.close);
     await pumpTrophies(tester, ctrl.stream);
 

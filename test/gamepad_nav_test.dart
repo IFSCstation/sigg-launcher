@@ -25,7 +25,7 @@ Future<void> _settle(WidgetTester tester, [int rounds = 6]) async {
 
 Future<void> _pumpLibrary(
   WidgetTester tester,
-  Stream<NormalizedGamepadEvent> events,
+  Stream<GamepadEvent> events,
 ) async {
   await tester.binding.setSurfaceSize(const Size(1280, 720));
   await tester.pumpWidget(
@@ -33,7 +33,11 @@ Future<void> _pumpLibrary(
       debugShowCheckedModeBanner: false,
       theme: theme,
       navigatorObservers: [LauncherRouteObserver.instance],
-      home: Library(games: Future.value(mockGames), gamepadEvents: events),
+      home: Library(
+        games: Future.value(mockGames),
+        gamepadEvents: events,
+        gamepadLayout: GamepadKeyLayout.sdl3,
+      ),
     ),
   );
   await _settle(tester);
@@ -41,8 +45,8 @@ Future<void> _pumpLibrary(
 
 Future<void> _press(
   WidgetTester tester,
-  StreamController<NormalizedGamepadEvent> ctrl,
-  NormalizedGamepadEvent event,
+  StreamController<GamepadEvent> ctrl,
+  GamepadEvent event,
 ) async {
   ctrl.add(event);
   await tester.pump();
@@ -50,7 +54,7 @@ Future<void> _press(
 
 Future<void> _tap(
   WidgetTester tester,
-  StreamController<NormalizedGamepadEvent> ctrl,
+  StreamController<GamepadEvent> ctrl,
   GamepadButton button,
 ) async {
   await _press(tester, ctrl, buttonEvent(button, 1));
@@ -71,7 +75,7 @@ void main() {
   });
 
   testWidgets('d-pad moves the selection across game covers', (tester) async {
-    final ctrl = StreamController<NormalizedGamepadEvent>.broadcast();
+    final ctrl = StreamController<GamepadEvent>.broadcast();
     addTearDown(ctrl.close);
     await _pumpLibrary(tester, ctrl.stream);
 
@@ -84,7 +88,7 @@ void main() {
   });
 
   testWidgets('left stick drives navigation like the d-pad', (tester) async {
-    final ctrl = StreamController<NormalizedGamepadEvent>.broadcast();
+    final ctrl = StreamController<GamepadEvent>.broadcast();
     addTearDown(ctrl.close);
     await _pumpLibrary(tester, ctrl.stream);
 
@@ -102,7 +106,7 @@ void main() {
   });
 
   testWidgets('holding a direction keeps repeating the move', (tester) async {
-    final ctrl = StreamController<NormalizedGamepadEvent>.broadcast();
+    final ctrl = StreamController<GamepadEvent>.broadcast();
     addTearDown(ctrl.close);
     await _pumpLibrary(tester, ctrl.stream);
 
@@ -124,7 +128,7 @@ void main() {
 
   testWidgets('A opens the focused header page, B pops back, and nav is gated '
       'while a page is on top', (tester) async {
-    final ctrl = StreamController<NormalizedGamepadEvent>.broadcast();
+    final ctrl = StreamController<GamepadEvent>.broadcast();
     addTearDown(ctrl.close);
     await _pumpLibrary(tester, ctrl.stream);
 
@@ -159,7 +163,7 @@ void main() {
   });
 
   testWidgets('Start acts as confirm', (tester) async {
-    final ctrl = StreamController<NormalizedGamepadEvent>.broadcast();
+    final ctrl = StreamController<GamepadEvent>.broadcast();
     addTearDown(ctrl.close);
     await _pumpLibrary(tester, ctrl.stream);
 
@@ -177,7 +181,7 @@ void main() {
   testWidgets('gamepad input is ignored while a game is running', (
     tester,
   ) async {
-    final ctrl = StreamController<NormalizedGamepadEvent>.broadcast();
+    final ctrl = StreamController<GamepadEvent>.broadcast();
     addTearDown(ctrl.close);
     await _pumpLibrary(tester, ctrl.stream);
 
@@ -214,7 +218,7 @@ void main() {
   testWidgets('held-direction repeat is cancelled when a game opens', (
     tester,
   ) async {
-    final ctrl = StreamController<NormalizedGamepadEvent>.broadcast();
+    final ctrl = StreamController<GamepadEvent>.broadcast();
     addTearDown(ctrl.close);
     await _pumpLibrary(tester, ctrl.stream);
 

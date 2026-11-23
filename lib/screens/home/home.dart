@@ -31,6 +31,7 @@ class Library extends StatefulWidget {
     super.key,
     this.games,
     this.gamepadEvents,
+    this.gamepadLayout,
     this.achievementsService,
   });
 
@@ -39,9 +40,15 @@ class Library extends StatefulWidget {
   /// software from the [kSoftwareFolder] registry (games + apps).
   final Future<List<GameEntry>>? games;
 
-  /// Gamepad event source. Used by tests to drive navigation with synthetic
-  /// events; when null the real [Gamepads.normalizedEvents] stream is used.
-  final Stream<NormalizedGamepadEvent>? gamepadEvents;
+  /// Raw gamepad event source, matching the `xyz.luan/gamepads` wire. Used by
+  /// tests to drive navigation with synthetic events; when null the real
+  /// [Gamepads.events] stream is used.
+  final Stream<GamepadEvent>? gamepadEvents;
+
+  /// Overrides the raw key numbering of [gamepadEvents]; when null it is
+  /// detected from the embedder (see [detectGamepadKeyLayout]). Tests inject
+  /// [GamepadKeyLayout.sdl3] to exercise the ivi-homescreen contract.
+  final GamepadKeyLayout? gamepadLayout;
 
   /// Trophy daemon client. Used by tests to inject a fake daemon into the
   /// trophies submenu; when null the real unix-socket [AchievementService] is
@@ -77,7 +84,10 @@ class _LibraryState extends State<Library> {
     SoftwareRegistry.instance.addListener(_onRegistryChanged);
     HardwareKeyboard.instance.addHandler(_onKeyEvent);
     NavController.instance.onActivate = _onActivate;
-    _gamepadBridge = GamepadNavBridge(events: widget.gamepadEvents);
+    _gamepadBridge = GamepadNavBridge(
+      events: widget.gamepadEvents,
+      layout: widget.gamepadLayout,
+    );
     GamepadStatus.instance.start();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
