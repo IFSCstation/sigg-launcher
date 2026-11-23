@@ -3,8 +3,10 @@ import 'package:flutter/material.dart';
 
 import 'app_controller.dart';
 import 'app_widget.dart';
+import 'services/audio_log.dart';
 import 'services/gamepad_nav.dart';
 import 'services/perf_logger.dart';
+import 'services/soloud_backend.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -17,6 +19,16 @@ Future<void> main() async {
   _guardAgainstImageStreamAssertion();
   PerfLogger.start();
   registerSonyMappingOverrides();
+
+  // Initialize the SoLoud audio engine before running the app. If audio
+  // initialization fails (e.g. no audio sink available), the engine latches
+  // off (_failed) and UI sound / BGM silently degrade — navigation and
+  // playback are never blocked on audio. The original SoLoud.init() exception
+  // is logged with its full stack trace by SoloudEngine.init().
+  await SoloudEngine.instance.init();
+  logAudioInfo('audio:startup',
+      'SoloudEngine initialized=${SoloudEngine.instance.isInitialized}');
+
   await AppController.instance.loadUsers();
   runApp(AppWidget());
 }

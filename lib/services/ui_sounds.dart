@@ -1,100 +1,142 @@
 import 'dart:async';
 
-import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
+import 'package:sigg_launcher/services/audio_log.dart';
+import 'package:sigg_launcher/services/soloud_backend.dart';
 
 /// Plays the short UI "selection changed" tick (XMB-style), fired by
 /// keyboard/gamepad navigation whenever the focused item moves.
 ///
 /// Deliberately separate from [BgmPlayer]: it is a one-shot, non-looping
 /// blip that should not fight the game's background music over volume or
-/// release mode. It is best-effort — any plugin failure permanently disables
-/// it so navigation never breaks on sound.
+/// release mode. It is best-effort — plugin failures permanently disable it
+/// so navigation never breaks on sound.
 ///
-/// A single reused [AudioPlayer] can't keep up with rapid moves (gamepad
-/// auto-repeat fires every ~120ms) and re-playing a pipeline that already hit
-/// EOS goes silently silent on the Linux plugin (native Stop() re-seeks it
-/// and the pulse sink never resyncs). So every tick gets a brand-new player
-/// that plays the source once and disposes itself on completion — fresh
-/// pipelines never hit the stale-EOS path, and a `dispose` of a mid-play
-/// player is a cheap, non-blocking teardown.
+/// The click [AudioSource] is loaded once into memory and reused for every
+/// tick. Overlapping ticks (e.g. gamepad auto-repeat at ~8 Hz) create
+/// multiple simultaneous voices from the same source — no source creation or
+/// disposal per tick, which was the single most expensive audio operation
+/// under `audioplayers`.
+///
+/// A shared load future ensures that rapid, overlapping `selectionChanged()`
+/// calls trigger exactly one `loadAsset` — subsequent calls await the same
+/// future instead of each starting their own load.
 class UiSounds {
   UiSounds._();
 
   static final UiSounds instance = UiSounds._();
 
-  AudioPlayer? _active;
+  /// The SoLoud engine. Inject a fake in tests via [debugReset].
+  SoloudBackend _engine = SoloudEngine.instance;
+
+  int? _tickSourceId;
+  Future<int>? _tickSourceLoadFuture;
+
   bool _unavailable = false;
   bool _enabled = true;
   double _volume = 1.0;
+
+  bool _reportedInitFailure = false;
+
+  @visibleForTesting
+  int debugSourcesLoaded = 0;
+
+  @visibleForTesting
+  int debugSourcesDisposed = 0;
 
   bool get enabled => _enabled;
 
   double get volume => _volume;
 
   /// Silences the player (used by tests where no audio plugin exists). Mirrors
-  /// the permanent latched state a first [MissingPluginException] triggers.
+  /// the permanent latched state an engine failure triggers in production.
   @visibleForTesting
   void debugDisable() {
     _unavailable = true;
+    unawaited(_disposeSource());
+  }
+
+  @visibleForTesting
+  void debugReset({SoloudBackend? engine}) {
+    _engine = engine ?? SoloudEngine.instance;
+    _unavailable = false;
+    _enabled = true;
+    _volume = 1.0;
+    debugSourcesLoaded = 0;
+    debugSourcesDisposed = 0;
+    unawaited(_disposeSource());
   }
 
   void setEnabled(bool enabled) {
     if (_enabled == enabled) return;
     _enabled = enabled;
     if (!enabled) {
-      _disposeSafely(_active);
-      _active = null;
+      unawaited(_disposeSource());
     }
   }
 
   Future<void> setVolume(double volume) async {
-    _volume = volume.clamp(0.0, 1.0).toDouble();
-    final player = _active;
-    if (player == null || _unavailable) return;
-    try {
-      await player.setVolume(_volume);
-    } catch (_) {
-      // Audio settings are best-effort; they must not interrupt navigation.
-    }
+    final next = volume.clamp(0.0, 1.0).toDouble();
+    if (_volume == next) return;
+    _volume = next;
+    // The tick source is shared across all voices; volume applies to new
+    // playback. Already-playing voices keep their volume until they end.
   }
 
   Future<void> selectionChanged() async {
     if (_unavailable || !_enabled) return;
-    try {
-      // Retire a still-playing blip (usually already gone) before starting a
-      // fresh one so a rapid repeat never overlaps itself.
-      _disposeSafely(_active);
-      _active = null;
-      final player = AudioPlayer();
-      _active = player;
-      player.onPlayerComplete.listen((_) {
-        if (identical(_active, player)) _active = null;
-        _disposeSafely(player);
-      });
-      await player.setReleaseMode(ReleaseMode.stop);
-      await player.setVolume(_volume);
-      await player.play(AssetSource('sfx/click.wav'));
-    } on MissingPluginException {
+    // If the engine failed to initialize, report the original failure once and
+    // permanently disable UI sounds instead of repeatedly throwing
+    // "SoloudEngine not initialized".
+    if (_engine.initError != null) {
+      if (!_reportedInitFailure) {
+        logAudioError(
+          'ui-init',
+          'SoloudEngine failed to initialize: ${_engine.initError}; '
+          'UI sounds are unavailable',
+        );
+        _reportedInitFailure = true;
+      }
       _unavailable = true;
-    } catch (_) {
-      // Best-effort: a transient decode/play error must never block nav.
+      unawaited(_disposeSource());
+      return;
+    }
+    try {
+      final sourceId = await _ensureTickSource();
+      if (_unavailable) return;
+      _engine.play(sourceId, volume: _volume);
+    } catch (error, stackTrace) {
+      logAudioError('ui-sound', error, stackTrace);
+      _unavailable = true;
+      await _disposeSource();
     }
   }
 
-  /// Discards a finished/overshadowed blip's pipeline. Fire-and-forget and
-  /// exception-proof: [AudioPlayer.dispose] is not idempotent (a disposed
-  /// pipeline re-disposes on the native side), and raced EOS teardown must
-  /// never surface an unhandled async error.
-  void _disposeSafely(AudioPlayer? player) {
-    if (player == null) return;
-    unawaited(() async {
-      try {
-        await player.dispose();
-      } catch (_) {
-        // Best-effort: never break navigation over sound teardown.
-      }
-    }());
+  /// Ensures the click source is loaded, sharing a single load future across
+  /// concurrent callers so rapid overlapping ticks trigger exactly one load.
+  Future<int> _ensureTickSource() async {
+    if (_tickSourceId != null) return _tickSourceId!;
+    _tickSourceLoadFuture ??= _engine.loadAsset('sfx/click.wav');
+    final loadFuture = _tickSourceLoadFuture!;
+    try {
+      final sourceId = await loadFuture;
+      _tickSourceId = sourceId;
+      return sourceId;
+    } finally {
+      _tickSourceLoadFuture = null;
+    }
+  }
+
+  Future<void> _disposeSource() async {
+    final sourceId = _tickSourceId;
+    _tickSourceId = null;
+    _tickSourceLoadFuture = null;
+    if (sourceId == null) return;
+    try {
+      await _engine.disposeSource(sourceId);
+      debugSourcesDisposed++;
+    } catch (error, stackTrace) {
+      logAudioError('ui-dispose-source', error, stackTrace);
+    }
   }
 }

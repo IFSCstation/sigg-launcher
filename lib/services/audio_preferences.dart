@@ -28,7 +28,15 @@ class AudioPreferences extends ChangeNotifier {
   void setMusicEnabled(bool enabled) {
     if (_musicEnabled == enabled) return;
     _musicEnabled = enabled;
-    unawaited(BgmPlayer.instance.setVolume(_musicEnabled ? _musicVolume : 0.0));
+    if (enabled) {
+      // Apply the current preference before replaying the remembered track.
+      unawaited(BgmPlayer.instance.setVolume(_musicVolume));
+      unawaited(BgmPlayer.instance.setEnabled(true));
+    } else {
+      // Disabling releases the native pipeline instead of keeping a muted
+      // pipeline decoding into the audio sink.
+      unawaited(BgmPlayer.instance.setEnabled(false));
+    }
     notifyListeners();
   }
 
@@ -36,7 +44,9 @@ class AudioPreferences extends ChangeNotifier {
     final next = _clamp(volume);
     if (_musicVolume == next) return;
     _musicVolume = next;
-    if (_musicEnabled) unawaited(BgmPlayer.instance.setVolume(_musicVolume));
+    // BgmPlayer stores the target even while disabled, so re-enabling uses
+    // the latest level.
+    unawaited(BgmPlayer.instance.setVolume(_musicVolume));
     notifyListeners();
   }
 

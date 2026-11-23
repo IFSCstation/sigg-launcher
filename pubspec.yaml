@@ -8,9 +8,10 @@ environment:
 
 dependencies:
   archive: ^4.6.0
-  audioplayers: ^6.8.1
   flutter:
     sdk: flutter
+  flutter_soloud:
+    path: ./tool/flutter_soloud_patch
   gamepads: ^0.1.11
 
 dev_dependencies:

@@ -20,7 +20,9 @@ class GameLauncher {
       return;
     }
 
-    await BgmPlayer.instance.stop();
+    // Do not wait for the fade: the window is about to be hidden, and the
+    // blocking native teardown would otherwise delay the game's startup.
+    unawaited(BgmPlayer.instance.stop(fade: false));
 
     // If the value is an existing file, run it directly from its own folder
     // (many games need the working directory to find their assets).

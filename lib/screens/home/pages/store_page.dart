@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -432,7 +433,7 @@ class _StorePageState extends State<StorePage> {
     }
     if (!confirmed || !mounted) return;
 
-    await BgmPlayer.instance.stop();
+    unawaited(BgmPlayer.instance.stop(fade: false));
     try {
       final removed = _installer.uninstall(package.id);
       _refreshInstalled();
