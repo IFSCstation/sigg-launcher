@@ -17,6 +17,11 @@ abstract class SoloudBackend {
   /// Whether [init] has completed successfully.
   bool get isInitialized;
 
+  /// The original exception from a failed [init], or null if initialization
+  /// has not been attempted or succeeded. Exposed so callers can surface the
+  /// root cause instead of repeating "not initialized".
+  Object? get initError;
+
   /// Initialises the SoLoud engine once. Safe to call multiple times; only the
   /// first call initialises the native engine.
   Future<void> init({
@@ -69,9 +74,16 @@ class SoloudEngine implements SoloudBackend {
 
   bool _initialized = false;
   bool _failed = false;
+  Object? _initError;
 
   @override
   bool get isInitialized => _initialized && !_failed;
+
+  /// The original exception from a failed `SoLoud.init()`, or null if
+  /// initialization has not been attempted or succeeded. Exposed so callers
+  /// can surface the root cause instead of repeating "not initialized".
+  @override
+  Object? get initError => _initError;
 
   @override
   Future<void> init({
@@ -80,6 +92,9 @@ class SoloudEngine implements SoloudBackend {
     bool lowLatency = true,
   }) async {
     if (_initialized || _failed) return;
+    logAudioInfo('soloud-init',
+        'initializing SoLoud (sampleRate=$sampleRate, bufferSize=$bufferSize, '
+        'channels=stereo, lowLatency=$lowLatency)');
     try {
       await SoLoud.instance.init(
         sampleRate: sampleRate,
@@ -88,22 +103,36 @@ class SoloudEngine implements SoloudBackend {
         lowLatency: lowLatency,
       );
       _initialized = true;
+      logAudioInfo('soloud-init', 'SoLoud engine initialized successfully');
     } catch (error, stackTrace) {
       _failed = true;
+      _initError = error;
       logAudioError('soloud-init', error, stackTrace);
     }
   }
 
   @override
   Future<int> loadFile(String path) async {
-    if (!_initialized) throw StateError('SoloudEngine not initialized');
+    if (_failed) {
+      throw StateError(
+          'SoloudEngine initialization failed: $_initError; audio is unavailable');
+    }
+    if (!_initialized) {
+      throw StateError('SoloudEngine not initialized');
+    }
     final source = await SoLoud.instance.loadFile(path);
     return _registerSource(source);
   }
 
   @override
   Future<int> loadAsset(String key) async {
-    if (!_initialized) throw StateError('SoloudEngine not initialized');
+    if (_failed) {
+      throw StateError(
+          'SoloudEngine initialization failed: $_initError; audio is unavailable');
+    }
+    if (!_initialized) {
+      throw StateError('SoloudEngine not initialized');
+    }
     final source = await SoLoud.instance.loadAsset(key);
     return _registerSource(source);
   }

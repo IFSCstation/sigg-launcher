@@ -36,6 +36,8 @@ class UiSounds {
   bool _enabled = true;
   double _volume = 1.0;
 
+  bool _reportedInitFailure = false;
+
   @visibleForTesting
   int debugSourcesLoaded = 0;
 
@@ -83,6 +85,22 @@ class UiSounds {
 
   Future<void> selectionChanged() async {
     if (_unavailable || !_enabled) return;
+    // If the engine failed to initialize, report the original failure once and
+    // permanently disable UI sounds instead of repeatedly throwing
+    // "SoloudEngine not initialized".
+    if (_engine.initError != null) {
+      if (!_reportedInitFailure) {
+        logAudioError(
+          'ui-init',
+          'SoloudEngine failed to initialize: ${_engine.initError}; '
+          'UI sounds are unavailable',
+        );
+        _reportedInitFailure = true;
+      }
+      _unavailable = true;
+      unawaited(_disposeSource());
+      return;
+    }
     try {
       final sourceId = await _ensureTickSource();
       if (_unavailable) return;

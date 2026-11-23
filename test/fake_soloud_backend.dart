@@ -13,9 +13,13 @@ class FakeSoloudBackend implements SoloudBackend {
 
   bool _initialized = false;
   bool _failed = false;
+  Object? _initError;
 
   @override
   bool get isInitialized => _initialized && !_failed;
+
+  @override
+  Object? get initError => _initError;
 
   @override
   Future<void> init({
@@ -28,7 +32,10 @@ class FakeSoloudBackend implements SoloudBackend {
       bufferSize: bufferSize,
       lowLatency: lowLatency,
     ));
-    if (_failed) throw StateError('simulated init failure');
+    if (_failed) {
+      _initError = StateError('simulated init failure');
+      throw StateError('simulated init failure');
+    }
     _initialized = true;
   }
 

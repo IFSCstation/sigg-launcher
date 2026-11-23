@@ -10,3 +10,10 @@ void logAudioError(String scope, Object error, [StackTrace? stackTrace]) {
     debugPrint('$stackTrace');
   }
 }
+
+/// Logs an informational audio lifecycle event. Mirrors [logAudioError] but
+/// for successful / lifecycle events so they can be distinguished from
+/// failures in the shell log stream. Avoids logging sensitive system info.
+void logAudioInfo(String scope, String message) {
+  debugPrint('[audio:$scope] $message');
+}

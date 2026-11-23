@@ -37,6 +37,8 @@ class BgmPlayer {
   bool _unavailable = false;
   bool _enabled = true;
 
+  bool _reportedInitFailure = false;
+
   int _requestGeneration = 0;
   bool _trackActive = false;
   double _targetVolume = 1.0;
@@ -121,6 +123,19 @@ class BgmPlayer {
   Future<void> play(String path) {
     debugLastRequested = path;
     if (_unavailable) return Future<void>.value();
+    // If the engine failed to initialize, report it once and stop here.
+    if (_engine.initError != null) {
+      if (!_reportedInitFailure) {
+        logAudioError(
+          'bgm-init',
+          'SoloudEngine failed to initialize: ${_engine.initError}; '
+          'background music is unavailable',
+        );
+        _reportedInitFailure = true;
+      }
+      _unavailable = true;
+      return Future<void>.value();
+    }
     final file = File(path).absolute;
     _desiredPath = file.path;
     if (!_enabled) return Future<void>.value();
@@ -186,6 +201,22 @@ class BgmPlayer {
     if (_unavailable || !_enabled) return;
     if (generation != _requestGeneration) return;
     if (_currentPath == path && _trackActive) return;
+
+    // If the engine failed to initialize, report the original failure once
+    // and permanently disable BGM instead of repeatedly throwing
+    // "SoloudEngine not initialized" on every play request.
+    if (_engine.initError != null) {
+      if (!_reportedInitFailure) {
+        logAudioError(
+          'bgm-init',
+          'SoloudEngine failed to initialize: ${_engine.initError}; '
+          'background music is unavailable',
+        );
+        _reportedInitFailure = true;
+      }
+      _unavailable = true;
+      return;
+    }
 
     final file = File(path);
     if (!await file.exists()) return;
