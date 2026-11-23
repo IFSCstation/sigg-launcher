@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter/widgets.dart';
 import 'package:gamepads/gamepads.dart';
@@ -7,6 +8,114 @@ import 'package:sigg_launcher/services/nav_controller.dart';
 import 'package:sigg_launcher/services/page_nav_controller.dart';
 
 enum _NavDir { up, down, left, right }
+
+/// How the `xyz.luan/gamepads` plugin behind the current binary numbers its
+/// raw `key` values. `gamepads` documents `key` only as "a
+/// platform-dependant identifier", and the two Linux plugins disagree:
+///
+/// - [evdev]: pub's GTK `gamepads_linux` reports raw `/dev/input/js*` indices,
+///   which only the package's controller-database mapping can interpret
+///   (including the per-VID/PID DS4 override in [registerSonyMappingOverrides]).
+/// - [sdl3]: ivi-homescreen's `gamepads_linux` (v2.0) reports SDL3 controller
+///   indices, already abstracted by SDL's own database, so they must NOT go
+///   through the evdev-shaped mapping (README: "Consume `Gamepads.events` and
+///   map the indices directly").
+enum GamepadKeyLayout { evdev, sdl3 }
+
+/// Overrides [detectGamepadKeyLayout]: `SIGG_GAMEPAD_LAYOUT=sdl3|evdev`.
+const _kLayoutEnvVar = 'SIGG_GAMEPAD_LAYOUT';
+
+/// Picks the raw key numbering used by the running embedder.
+///
+/// ivi-homescreen runs the app inside its `homescreen` binary, whose gamepads
+/// plugin speaks SDL3; the GTK runner is `sigg_launcher` and loads pub's
+/// evdev-based plugin. `SIGG_GAMEPAD_LAYOUT` wins when set, so a renamed
+/// embedder can still be pointed at the right contract.
+GamepadKeyLayout detectGamepadKeyLayout({
+  Map<String, String>? environment,
+  String? executablePath,
+}) {
+  final override = (environment ?? Platform.environment)[_kLayoutEnvVar]
+      ?.trim()
+      .toLowerCase();
+  if (override == 'sdl3') return GamepadKeyLayout.sdl3;
+  if (override == 'evdev') return GamepadKeyLayout.evdev;
+
+  final executable = executablePath ?? Platform.resolvedExecutable;
+  return executable.split('/').last == 'homescreen'
+      ? GamepadKeyLayout.sdl3
+      : GamepadKeyLayout.evdev;
+}
+
+/// SDL3 `SDL_GamepadButton` indices the launcher acts on. The d-pad is
+/// 11..14 by contract, not four buttons of a hat axis.
+const Map<int, GamepadButton> _sdl3Buttons = {
+  0: GamepadButton.a, // SOUTH
+  1: GamepadButton.b, // EAST
+  6: GamepadButton.start, // START
+  11: GamepadButton.dpadUp,
+  12: GamepadButton.dpadDown,
+  13: GamepadButton.dpadLeft,
+  14: GamepadButton.dpadRight,
+};
+
+/// SDL3 `SDL_GamepadAxis` indices 0..5.
+const Map<int, GamepadAxis> _sdl3Axes = {
+  0: GamepadAxis.leftStickX,
+  1: GamepadAxis.leftStickY,
+  2: GamepadAxis.rightStickX,
+  3: GamepadAxis.rightStickY,
+  4: GamepadAxis.leftTrigger,
+  5: GamepadAxis.rightTrigger,
+};
+
+/// Converts one raw SDL3 event into the package's normalized shape, so every
+/// decision downstream (zones, activation, auto-repeat) stays in one place.
+///
+/// SDL hands Sint16 across unscaled: sticks are bipolar and triggers are
+/// rescaled to 0..32767 by SDL before the plugin sees them. SDL reports stick
+/// Y as negative-up, while [NormalizedGamepadEvent] uses positive-up.
+List<NormalizedGamepadEvent> _mapSdl3Event(GamepadEvent event) {
+  final index = int.tryParse(event.key);
+  if (index == null) return const [];
+
+  if (event.type == KeyType.button) {
+    final button = _sdl3Buttons[index];
+    if (button == null) return const [];
+    return [
+      NormalizedGamepadEvent(
+        gamepadId: event.gamepadId,
+        timestamp: event.timestamp,
+        value: event.value != 0 ? 1.0 : 0.0,
+        button: button,
+        rawEvent: event,
+      ),
+    ];
+  }
+
+  final axis = _sdl3Axes[index];
+  if (axis == null) return const [];
+  final isTrigger =
+      axis == GamepadAxis.leftTrigger || axis == GamepadAxis.rightTrigger;
+  final isStickY =
+      axis == GamepadAxis.leftStickY || axis == GamepadAxis.rightStickY;
+  var value = event.value / 32767.0;
+  if (isTrigger) {
+    value = value.clamp(0.0, 1.0).toDouble();
+  } else {
+    value = value.clamp(-1.0, 1.0).toDouble();
+    if (isStickY) value = -value;
+  }
+  return [
+    NormalizedGamepadEvent(
+      gamepadId: event.gamepadId,
+      timestamp: event.timestamp,
+      value: value,
+      axis: axis,
+      rawEvent: event,
+    ),
+  ];
+}
 
 class _HeldDir {
   final _NavDir dir;
@@ -96,7 +205,8 @@ class LauncherRouteObserver extends NavigatorObserver {
 
 class GamepadNavBridge {
   GamepadNavBridge({
-    Stream<NormalizedGamepadEvent>? events,
+    Stream<GamepadEvent>? events,
+    GamepadKeyLayout? layout,
     NavController? controller,
     LauncherRouteObserver? routeObserver,
     PageFocusHub? focusHub,
@@ -106,8 +216,9 @@ class GamepadNavBridge {
   }) : _controller = controller ?? NavController.instance,
        _routeObserver = routeObserver ?? LauncherRouteObserver.instance,
        _focusHub = focusHub ?? PageFocusHub.instance,
-       _runState = runState ?? GameRunState.instance {
-    _subscription = (events ?? Gamepads.normalizedEvents).listen(_onEvent);
+       _runState = runState ?? GameRunState.instance,
+       _layout = layout ?? detectGamepadKeyLayout() {
+    _subscription = _decode(events ?? Gamepads.events).listen(_onEvent);
     _runState.addListener(_onRunStateChanged);
   }
 
@@ -115,11 +226,32 @@ class GamepadNavBridge {
   final LauncherRouteObserver _routeObserver;
   final PageFocusHub _focusHub;
   final GameRunState _runState;
+  final GamepadKeyLayout _layout;
   final Duration initialRepeatDelay;
   final Duration repeatedRepeatDelay;
   final Map<_NavDir, _HeldDir> _held = {};
 
   late final StreamSubscription<NormalizedGamepadEvent> _subscription;
+
+  /// Turns raw platform events into normalized ones, per [GamepadKeyLayout].
+  ///
+  /// Raw [Gamepads.events] are the source of truth for both backends; only
+  /// the evdev numbering needs the package's controller-database mapping.
+  Stream<NormalizedGamepadEvent> _decode(Stream<GamepadEvent> events) {
+    switch (_layout) {
+      case GamepadKeyLayout.evdev:
+        // Reuse the shared normalizer so a caller-supplied override (and the
+        // per-VID/PID DS4 mapping loaded at startup) is honored.
+        var normalizer = Gamepads.normalizer;
+        if (normalizer == null) {
+          normalizer = GamepadNormalizer();
+          Gamepads.normalizer = normalizer;
+        }
+        return events.transform(normalizer.transformer);
+      case GamepadKeyLayout.sdl3:
+        return events.expand(_mapSdl3Event);
+    }
+  }
 
   void _onEvent(NormalizedGamepadEvent event) {
     if (_runState.running) return;

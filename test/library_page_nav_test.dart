@@ -305,7 +305,7 @@ void main() {
   testWidgets('gamepad d-pad/A drive the library page and B backs out', (
     tester,
   ) async {
-    final ctrl = StreamController<NormalizedGamepadEvent>.broadcast();
+    final ctrl = StreamController<GamepadEvent>.broadcast();
     addTearDown(ctrl.close);
     final navKey = GlobalKey<NavigatorState>();
     await tester.binding.setSurfaceSize(const Size(1280, 720));
@@ -321,7 +321,10 @@ void main() {
         home: const Scaffold(body: SizedBox()),
       ),
     );
-    final bridge = GamepadNavBridge(events: ctrl.stream);
+    final bridge = GamepadNavBridge(
+      events: ctrl.stream,
+      layout: GamepadKeyLayout.sdl3,
+    );
     addTearDown(bridge.dispose);
     navKey.currentState!.push(
       MaterialPageRoute(
