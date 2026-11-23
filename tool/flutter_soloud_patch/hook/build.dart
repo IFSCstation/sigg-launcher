@@ -2671,13 +2671,14 @@ Future<void> _crossCompileLinux({
 Future<String?> _findCrossCompiler({required BuildInput input}) async {
   // Diagnostic: print PATH for debugging cross-compiler discovery.
   final pathEnv = Platform.environment['PATH'] ?? '';
-  final pathDirs = pathEnv.split(Platform.pathSeparator);
+  final pathDirs = pathEnv.split(Platform.isWindows ? ';' : ':');
   print('[flutter_soloud] PATH directories: ${pathDirs.join(', ')}');
 
   // 1. Check FLUTTER_HOOK_CC environment variable — emb_cli sets this to
   //    the cross-compiler path, even if this Flutter SDK doesn't read it
   //    natively (warning: "this Flutter SDK does not read FLUTTER_HOOK_CC").
   final flHookCc = Platform.environment['FLUTTER_HOOK_CC'];
+  print('[flutter_soloud] FLUTTER_HOOK_CC: ${flHookCc ?? '<not set>'}');
   if (flHookCc != null && flHookCc.isNotEmpty) {
     final ccFile = File(flHookCc);
     if (ccFile.existsSync()) {
@@ -2742,22 +2743,30 @@ Future<String?> _findCrossCompiler({required BuildInput input}) async {
 /// named sysroot under the workspace root.
 String? _findSysroot() {
   final pathEnv = Platform.environment['PATH'] ?? '';
-  for (final dir in pathEnv.split(Platform.pathSeparator)) {
+  for (final dir in pathEnv.split(Platform.isWindows ? ';' : ':')) {
     final dirEntity = Directory(dir);
     if (!dirEntity.existsSync()) continue;
     final dirName = dirEntity.path.split('/').last;
     if (dirName == 'hook-toolchain') {
       // hook-toolchain is at <workspace>/cross-build-XXXX/hook-toolchain
-      // Navigate up to workspace root, then look for sysroot siblings.
+      // sysroot is at <workspace>/cross-aarch64-none-linux-gnu-XXXX/sysroot
+      // Both are siblings under workspace root with different subdirectory names.
       final parent = dirEntity.parent;
       if (!parent.existsSync()) continue;
       final workspace = parent.parent;
       if (!workspace.existsSync()) continue;
       try {
         for (final entry in workspace.listSync()) {
-          if (entry is Directory && entry.path.endsWith('/sysroot')) {
-            print('[flutter_soloud] Found sysroot: ${entry.path}');
-            return entry.path;
+          if (entry is Directory) {
+            final entryName = entry.path.split('/').last;
+            if (entryName.startsWith('cross-') &&
+                entry.listSync().any((e) => e.path.endsWith('/sysroot'))) {
+              final sysrootDir = Directory('${entry.path}/sysroot');
+              if (sysrootDir.existsSync()) {
+                print('[flutter_soloud] Found sysroot: ${sysrootDir.path}');
+                return sysrootDir.path;
+              }
+            }
           }
         }
       } catch (_) {}
