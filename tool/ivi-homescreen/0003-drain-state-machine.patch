@@ -1,0 +1,1536 @@
+diff --git a/shell/CMakeLists.txt b/shell/CMakeLists.txt
+index c7fffcac..51a89389 100644
+--- a/shell/CMakeLists.txt
++++ b/shell/CMakeLists.txt
+@@ -48,6 +48,7 @@ add_executable(${PROJECT_NAME}
+         vsync/consumer_paced_vsync.cc
+         timer.cc
+         view/flutter_view.cc
++        view/window_hide_state.cc
+         view/platform_view_scene.cc
+         watchdog/watchdog.cc
+         watchdog/stats.cc
+diff --git a/shell/backend/backend.h b/shell/backend/backend.h
+index d901759d..5bbc81d4 100644
+--- a/shell/backend/backend.h
++++ b/shell/backend/backend.h
+@@ -407,6 +407,19 @@ class Backend {
+    */
+   virtual bool IsVsyncParked() const { return false; }
+ 
++  /**
++   * @brief Frames handed to the engine that have not yet been presented.
++   *
++   * Used by the sigg_launcher/window hide path: after parking, it waits for
++   * this to reach 0 before minimizing, so a frame already being built cannot
++   * commit after the window is gone.
++   *
++   * Default 0 = "no tracking, treat as drained" — for backends that drive no
++   * vsync source of their own there is no frame to wait for. The Wayland EGL
++   * backend reports its wp_presentation provider's count.
++   */
++  virtual uint32_t FramesInFlight() const { return 0; }
++
+   /**
+    * @brief Release the backend's GPU / windowing-system resources (render
+    * surface, native window, GL contexts, display connection).
+diff --git a/shell/backend/wayland_egl/wayland_egl.h b/shell/backend/wayland_egl/wayland_egl.h
+index 08b02311..8214a5de 100644
+--- a/shell/backend/wayland_egl/wayland_egl.h
++++ b/shell/backend/wayland_egl/wayland_egl.h
+@@ -216,6 +216,12 @@ class WaylandEglBackend : public Egl, public Backend {
+     return vsync_ != nullptr && vsync_->IsParked();
+   }
+ 
++  uint32_t FramesInFlight() const override {
++    // No provider means no vsync source at all: nothing can be in flight
++    // (and parking is a no-op, which IsVsyncParked() reports).
++    return vsync_ != nullptr ? vsync_->FramesInFlight() : 0;
++  }
++
+   void StopVsyncMonitor() override;
+ 
+   /**
+diff --git a/shell/platform/homescreen/flutter_desktop.cc b/shell/platform/homescreen/flutter_desktop.cc
+index 00675401..6a509e88 100644
+--- a/shell/platform/homescreen/flutter_desktop.cc
++++ b/shell/platform/homescreen/flutter_desktop.cc
+@@ -49,6 +49,56 @@ static_assert(FLUTTER_ENGINE_VERSION == 1, "Engine version does not match");
+ 
+ namespace {
+ 
++// State shared between a channel call and its async hide/show reply. The
++// callback handed to WindowHideState must be copy-constructible
++// (std::function), so a move-only MethodResult can't be captured directly;
++// the shared_ptr below is copyable and owns the result until the reply fires.
++struct WindowReply {
++  std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result;
++};
++
++// Turns a hide/show Result into the channel response: a map {parked,
++// minimized} on success, or a PlatformException code on failure. Runs once.
++void CompleteWindowReply(std::shared_ptr<WindowReply> reply,
++                         const ivi::WindowHideState::Result& r) {
++  flutter::EncodableMap payload;
++  payload[flutter::EncodableValue("parked")] = flutter::EncodableValue(r.parked);
++  payload[flutter::EncodableValue("minimized")] =
++      flutter::EncodableValue(r.minimized);
++
++  auto success = [&payload](auto* res) {
++    res->Success(flutter::EncodableValue(std::move(payload)));
++  };
++  auto error = [&payload](auto* res, const char* code,
++                          const char* msg) { res->Error(code, msg); };
++
++  switch (r.outcome) {
++    case ivi::WindowHideState::Outcome::kOk:
++      success(reply->result.get());
++      break;
++    case ivi::WindowHideState::Outcome::kNotParked:
++      error(reply->result.get(), "not-parked",
++            "vsync provider unavailable; frames still being produced");
++      break;
++    case ivi::WindowHideState::Outcome::kDrainTimeout:
++      error(reply->result.get(), "drain-timeout",
++            "a frame was still in flight when hide's deadline passed");
++      break;
++    case ivi::WindowHideState::Outcome::kMinimizeFailed:
++      error(reply->result.get(), "minimize-failed",
++            "compositor did not confirm minimize");
++      break;
++    case ivi::WindowHideState::Outcome::kRestoreFailed:
++      error(reply->result.get(), "restore-failed",
++            "compositor did not confirm restore");
++      break;
++    case ivi::WindowHideState::Outcome::kCancelled:
++      error(reply->result.get(), "cancelled",
++            "a later hide/show superseded this request");
++      break;
++  }
++}
++
+ // sigg_launcher/window channel: hide/show backed by FlutterView::Hide() /
+ // Show() (vsync parking). The same channel name is used by the GTK runner
+ // (linux/runner/my_application.cc), so WindowService.dart needs no platform
+@@ -78,26 +128,36 @@ class WindowHandlerPlugin final : public flutter::Plugin {
+       return;
+     }
+     const std::string& method = call.method_name();
++
+     if (method == "hide") {
+-      view_->Hide();
+-      // No silent failure: if the vsync provider does not exist
+-      // (wp_presentation missing or IVI_WL_VSYNC=0), parking is a no-op and
+-      // frames are still produced. Report an error so Dart knows.
+-      if (!view_->IsParked()) {
+-        result->Error("park-failed",
+-                      "vsync provider unavailable; frames still being "
+-                      "produced");
+-        return;
+-      }
+-      result->Success();
++      // hide waits until no frame is in flight before minimizing, so its reply
++      // comes after the drain + minimize steps complete — never blocking the
++      // platform thread. No silent failure: if parking did not take effect
++      // (no vsync provider), the machine reports kNotParked ("not-parked").
++      auto reply = std::make_shared<WindowReply>();
++      reply->result = std::move(result);
++      view_->Hide([this, reply](const ivi::WindowHideState::Result r) {
++        CompleteWindowReply(reply, r);
++      });
+     } else if (method == "show") {
+-      view_->Show();
+-      // Parking does not paint: request one frame so the surface content
+-      // comes back.
+-      if (state_->flutter_engine != nullptr) {
+-        LibFlutterEngine->ScheduleFrame(state_->flutter_engine);
+-      }
+-      result->Success();
++      auto reply = std::make_shared<WindowReply>();
++      reply->result = std::move(result);
++      view_->Show([this, reply](const ivi::WindowHideState::Result r) {
++        // Resume() alone does not paint if the engine was idle when it parked.
++        // Request one frame so the surface content comes back. Do it here,
++        // after Show()'s drain/restore so the restored surface actually paints.
++        if (r.outcome == ivi::WindowHideState::Outcome::kOk &&
++            state_->flutter_engine != nullptr) {
++          LibFlutterEngine->ScheduleFrame(state_->flutter_engine);
++        }
++        CompleteWindowReply(reply, r);
++      });
++    } else if (method == "state") {
++      // Read-only current state machine value.
++      flutter::EncodableMap payload;
++      payload[flutter::EncodableValue("state")] = flutter::EncodableValue(
++          ivi::WindowHideState::StateName(view_->GetHideState()));
++      result->Success(flutter::EncodableValue(std::move(payload)));
+     } else {
+       result->NotImplemented();
+     }
+diff --git a/shell/view/flutter_view.cc b/shell/view/flutter_view.cc
+index 305ba2a5..fd7f4917 100644
+--- a/shell/view/flutter_view.cc
++++ b/shell/view/flutter_view.cc
+@@ -24,6 +24,7 @@
+ #include <utility>
+ 
+ #include "asio/post.hpp"
++#include "asio/steady_timer.hpp"
+ 
+ #include "app.h"
+ #include "backend/backend_registry.h"
+@@ -211,7 +212,8 @@ FlutterView::FlutterView(Configuration::Config config,
+         });
+         ihs::log::debug("[FlutterView] view {}: platform view {} {} the scene",
+                         m_index, id, suspended ? "left" : "re-entered");
+-      }) {
++      }),
++      m_hide_state_(MakeHideHooks()) {
+   // Record the renderer before the backend is built: a backend's constructor
+   // decides things that depend on it -- drm_kms_vulkan declares the instance
+   // extensions Impeller's capability check reads -- and that runs well before
+@@ -489,6 +491,13 @@ bool FlutterView::IsParked() const {
+   return false;
+ }
+ 
++uint32_t FlutterView::FramesInFlight() const {
++  if (m_backend) {
++    return m_backend->FramesInFlight();
++  }
++  return 0;
++}
++
+ void FlutterView::SetSuspended(SuspendReason reason, bool suspended) {
+   const int flag = static_cast<int>(reason);
+   const int previous = suspended
+@@ -531,12 +540,75 @@ void FlutterView::Resume() {
+   SetSuspended(SuspendReason::kOutputDisconnected, false);
+ }
+ 
+-void FlutterView::Hide() {
+-  SetSuspended(SuspendReason::kAppHidden, true);
++ivi::WindowHideState::Hooks FlutterView::MakeHideHooks() {
++  ivi::WindowHideState::Hooks hooks;
++  // Park/unpark under the app-hidden reason only: an output that went away
++  // (kOutputDisconnected) still holds the view parked across a show, so the
++  // two causes never cancel each other out.
++  hooks.park = [this] { SetSuspended(SuspendReason::kAppHidden, true); };
++  hooks.unpark = [this] { SetSuspended(SuspendReason::kAppHidden, false); };
++  hooks.is_parked = [this] { return IsParked(); };
++  hooks.frame_in_flight = [this] { return FramesInFlight() > 0; };
++  hooks.schedule = [this](const int delay_ms, std::function<void()> fn) {
++    ScheduleOnPlatformThread(delay_ms, std::move(fn));
++  };
++  // minimize/restore stay empty until the foreign-toplevel wiring exists.
++  // WindowHideState treats a missing hook as "nothing to do" and reports
++  // minimized=false, so hide is honest with Dart: parked, still on screen.
++  return hooks;
++}
++
++void FlutterView::ScheduleOnPlatformThread(const int delay_ms,
++                                           std::function<void()> fn) const {
++  const auto* runner =
++      m_flutter_engine ? m_flutter_engine->GetPlatformTaskRunner() : nullptr;
++  if (runner == nullptr || runner->GetIoContext() == nullptr) {
++    // Nothing to wait on — and with no engine there is no frame in flight
++    // either, so the drain is already over. Run inline rather than leave the
++    // caller's reply unanswered.
++    fn();
++    return;
++  }
++  // The timer lives on the platform thread's io_context, so it fires on the
++  // same thread that processes Flutter platform messages — which is where
++  // the channel's reply has to be sent. The handler keeps the timer alive
++  // through the shared_ptr in its own capture.
++  auto timer = std::make_shared<asio::steady_timer>(*runner->GetIoContext());
++  timer->expires_after(std::chrono::milliseconds(delay_ms));
++  timer->async_wait([timer, fn = std::move(fn)](const asio::error_code& ec) {
++    if (ec) {
++      return;  // canceled or destroyed
++    }
++    fn();
++  });
++}
++
++void FlutterView::ReplyOnPlatformThread(ivi::WindowHideState::Done done,
++                                         const ivi::WindowHideState::Result
++                                             result) const {
++  if (done == nullptr) {
++    return;
++  }
++  if (PostToPlatformThread([done = std::move(done), result] { done(result); })) {
++    return;
++  }
++  // No platform thread to marshal onto: either the engine is gone (nobody is
++  // waiting) or it never came up. Answer inline rather than drop the reply.
++  done(result);
++}
++
++void FlutterView::Hide(ivi::WindowHideState::Done done) {
++  m_hide_state_.Hide([this, done = std::move(done)](
++                         const ivi::WindowHideState::Result result) {
++    ReplyOnPlatformThread(std::move(done), result);
++  });
+ }
+ 
+-void FlutterView::Show() {
+-  SetSuspended(SuspendReason::kAppHidden, false);
++void FlutterView::Show(ivi::WindowHideState::Done done) {
++  m_hide_state_.Show([this, done = std::move(done)](
++                         const ivi::WindowHideState::Result result) {
++    ReplyOnPlatformThread(std::move(done), result);
++  });
+ }
+ 
+ bool FlutterView::PostToPlatformThread(std::function<void()> fn) const {
+diff --git a/shell/view/flutter_view.h b/shell/view/flutter_view.h
+index c5b6ac9d..615da7ab 100644
+--- a/shell/view/flutter_view.h
++++ b/shell/view/flutter_view.h
+@@ -30,6 +30,7 @@
+ #include "flutter_desktop_view_controller_state.h"
+ #include "view/display_metadata.h"
+ #include "view/platform_view_scene.h"
++#include "view/window_hide_state.h"
+ #if BUILD_ACCESSIBILITY
+ #include "shell/accessibility/accessibility_tree.h"
+ #endif
+@@ -305,19 +306,44 @@ class FlutterView {
+   /**
+    * @brief Park the view for app-initiated hide (sigg_launcher/window channel).
+    *
+-   * Same mechanism as Suspend() but tracked under the kAppHidden reason so
+-   * that Show() cannot unpark a view whose output was disconnected.
++   * Drives WindowHideState: parks under the kAppHidden reason, waits for the
++   * in-flight frame to be presented, then hands off to the minimize hook, and
++   * only then calls @p done. Same parking mechanism as Suspend(), tracked
++   * under its own reason so Show() cannot unpark a view whose output is still
++   * gone.
++   *
++   * @p done runs exactly once, on the platform task thread (the reply has to
++   * reach a flutter::MethodResult there), with the parked/minimized facts.
+    * @relation internal
+    */
+-  void Hide();
++  void Hide(ivi::WindowHideState::Done done);
+ 
+   /**
+-   * @brief Unpark the view for app-initiated show.
++   * @brief Unpark the view for app-initiated show; inverse of Hide().
++   * Restores the toplevel first, then resumes frame production, then calls
++   * @p done on the platform task thread.
+    * @relation internal
+    */
+-  void Show();
++  void Show(ivi::WindowHideState::Done done);
++
++  /// The hide/show state machine's current state, for the channel's
++  /// read-only "state" method.
++  [[nodiscard]] ivi::WindowHideState::State GetHideState() const {
++    return m_hide_state_.GetState();
++  }
+ 
+  private:
++  // Hooks the hide/show state machine uses to act on this view; built once
++  // (the machine stores them by value).
++  ivi::WindowHideState::Hooks MakeHideHooks();
++  // Run @p fn on the platform task thread after @p delay_ms (asio timer on
++  // that thread's io_context). Used by the drain poll.
++  void ScheduleOnPlatformThread(int delay_ms, std::function<void()> fn) const;
++  // Deliver a hide/show reply on the platform task thread; falls back to
++  // running it inline when there is no engine to marshal onto.
++  void ReplyOnPlatformThread(ivi::WindowHideState::Done done,
++                             ivi::WindowHideState::Result result) const;
++
+   // Why the view is parked. A bitmask: the view stays parked while any bit is
+   // set, so clearing one reason cannot unpark a view the other reason still
+   // holds. Declared before SetSuspended() because a parameter type must be
+@@ -352,6 +378,12 @@ class FlutterView {
+   /// (no wp_presentation provider, so parking was a no-op).
+   [[nodiscard]] bool IsParked() const;
+ 
++  /// Frames handed to the engine that have not yet been presented or
++  /// discarded — a frame is still in flight. The hide path parks first and
++  /// then waits for this to reach 0 (see WindowHideState) before minimizing.
++  /// 0 with no backend (or a backend that does not track) means drained.
++  [[nodiscard]] uint32_t FramesInFlight() const;
++
+   /// This view's platform task runner, or nullptr before Initialize(). Exposed
+   /// for the OSGi host, which pins a critical bundle's engine thread to the
+   /// core its manifest names -- the thread belongs to the runner, and nothing
+@@ -549,5 +581,10 @@ class FlutterView {
+   // raw pointer to the same target throughout.
+   std::unique_ptr<FlutterDesktopEngineState> m_pending_engine_state;
+ 
++  // The hide/show state machine behind the sigg_launcher/window channel.
++  // Last member so its hooks (which capture `this`) are only ever called
++  // after everything else here is alive.
++  ivi::WindowHideState m_hide_state_;
++
+   static void RegisterPlugins(FlutterDesktopEngineRef engine);
+ };
+diff --git a/shell/view/window_hide_state.cc b/shell/view/window_hide_state.cc
+new file mode 100644
+index 00000000..17a1ab49
+--- /dev/null
++++ b/shell/view/window_hide_state.cc
+@@ -0,0 +1,318 @@
++/*
++ * Copyright 2026 Toyota Connected North America
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "shell/view/window_hide_state.h"
++
++#include <utility>
++
++namespace ivi {
++
++WindowHideState::WindowHideState(Hooks hooks) : hooks_(std::move(hooks)) {}
++
++void WindowHideState::RunWaiters(std::vector<Waiter>& waiters) {
++  for (auto& waiter : waiters) {
++    if (waiter.done) {
++      waiter.done(waiter.result);
++    }
++  }
++  waiters.clear();
++}
++
++uint64_t WindowHideState::CurrentGeneration() const {
++  const std::lock_guard<std::mutex> lock(mutex_);
++  return generation_;
++}
++
++WindowHideState::State WindowHideState::GetState() const {
++  const std::lock_guard<std::mutex> lock(mutex_);
++  return state_;
++}
++
++const char* WindowHideState::StateName(const State state) {
++  switch (state) {
++    case State::kVisible:
++      return "visible";
++    case State::kHiding:
++      return "hiding";
++    case State::kHidden:
++      return "hidden";
++    case State::kShowing:
++      return "showing";
++  }
++  return "unknown";
++}
++
++void WindowHideState::Hide(Done done) {
++  std::vector<Waiter> notify;
++  uint64_t generation = 0;
++  bool begin = false;
++
++  {
++    const std::lock_guard<std::mutex> lock(mutex_);
++    switch (state_) {
++      case State::kHidden:
++        // Already hidden: nothing to do, answer with the facts as they are.
++        notify.push_back({std::move(done), Result{Outcome::kOk, parked_, minimized_}});
++        break;
++
++      case State::kHiding:
++        // Join the hide in flight; answered when it resolves.
++        hide_waiters_.push_back({std::move(done), Result{}});
++        break;
++
++      case State::kShowing:
++        // Supersede the show: its waiters are answered kCancelled and the
++        // generation bump invalidates a restore completion still on its way
++        // back from the compositor.
++        for (auto& waiter : show_waiters_) {
++          waiter.result = Result{Outcome::kCancelled, parked_, minimized_};
++        }
++        notify.insert(notify.end(),
++                      std::make_move_iterator(show_waiters_.begin()),
++                      std::make_move_iterator(show_waiters_.end()));
++        show_waiters_.clear();
++        ++generation_;
++        state_ = State::kHiding;
++        generation = ++generation_;
++        hide_waiters_.push_back({std::move(done), Result{}});
++        begin = true;
++        break;
++
++      case State::kVisible:
++        state_ = State::kHiding;
++        generation = ++generation_;
++        hide_waiters_.push_back({std::move(done), Result{}});
++        begin = true;
++        break;
++    }
++  }
++
++  RunWaiters(notify);
++  if (begin) {
++    BeginHide(generation);
++  }
++}
++
++void WindowHideState::Show(Done done) {
++  std::vector<Waiter> notify;
++  uint64_t generation = 0;
++  bool begin = false;
++
++  {
++    const std::lock_guard<std::mutex> lock(mutex_);
++    switch (state_) {
++      case State::kVisible:
++        // Nothing hidden: answer immediately. parked_ reflects reality, so a
++        // caller that raced its own hide still sees the truth.
++        notify.push_back(
++            {std::move(done), Result{Outcome::kOk, parked_, minimized_}});
++        break;
++
++      case State::kShowing:
++        show_waiters_.push_back({std::move(done), Result{}});
++        break;
++
++      case State::kHiding:
++        // Supersede the hide: its waiters are answered kCancelled and the
++        // generation bump stops its drain/minimize steps from landing. Its
++        // park is undone by this show's unpark, so nothing stays parked.
++        for (auto& waiter : hide_waiters_) {
++          waiter.result = Result{Outcome::kCancelled, parked_, minimized_};
++        }
++        notify.insert(notify.end(),
++                      std::make_move_iterator(hide_waiters_.begin()),
++                      std::make_move_iterator(hide_waiters_.end()));
++        hide_waiters_.clear();
++        ++generation_;
++        state_ = State::kShowing;
++        generation = ++generation_;
++        show_waiters_.push_back({std::move(done), Result{}});
++        begin = true;
++        break;
++
++      case State::kHidden:
++        state_ = State::kShowing;
++        generation = ++generation_;
++        show_waiters_.push_back({std::move(done), Result{}});
++        begin = true;
++        break;
++    }
++  }
++
++  RunWaiters(notify);
++  if (begin) {
++    BeginShow(generation);
++  }
++}
++
++void WindowHideState::BeginHide(const uint64_t generation) {
++  if (CurrentGeneration() != generation) {
++    return;  // superseded before we even parked
++  }
++  if (hooks_.park) {
++    hooks_.park();
++  }
++
++  const bool parked = hooks_.is_parked ? hooks_.is_parked() : false;
++  if (!parked) {
++    // No vsync provider: parking is a no-op and frames are still produced.
++    // Report it rather than pretending the window is hidden — and leave the
++    // state Visible, because there is nothing to undo on show.
++    FinishHideNoParking(generation);
++    return;
++  }
++
++  {
++    const std::lock_guard<std::mutex> lock(mutex_);
++    if (generation_ == generation) {
++      parked_ = true;
++    }
++  }
++  PollDrain(generation, kDrainAttempts);
++}
++
++void WindowHideState::PollDrain(const uint64_t generation,
++                                const int attempts_left) {
++  if (CurrentGeneration() != generation) {
++    return;
++  }
++
++  const bool in_flight = hooks_.frame_in_flight && hooks_.frame_in_flight();
++  if (!in_flight) {
++    FinishHideDrained(generation);
++    return;
++  }
++  if (attempts_left <= 0 || !hooks_.schedule) {
++    // Parked, but the last frame never reported a present within the budget.
++    // Stay parked (frame production is stopped either way) and tell the
++    // caller, so it can decide rather than believe the window is hidden.
++    FinishHideDrainTimeout(generation);
++    return;
++  }
++
++  hooks_.schedule(kDrainPollMs, [this, generation, attempts_left] {
++    PollDrain(generation, attempts_left - 1);
++  });
++}
++
++void WindowHideState::FinishHideDrained(const uint64_t generation) {
++  if (CurrentGeneration() != generation) {
++    return;
++  }
++  if (!hooks_.minimize) {
++    CompleteHide(generation, Result{Outcome::kOk, /*parked=*/true,
++                                   /*minimized=*/false});
++    return;
++  }
++  hooks_.minimize([this, generation](const bool ok, const bool minimized) {
++    // The compositor answers on its own thread; re-check we still own the
++    // transition (a show may have arrived while we waited for it).
++    CompleteHide(generation,
++                 Result{ok ? Outcome::kOk : Outcome::kMinimizeFailed,
++                        /*parked=*/true, minimized});
++  });
++}
++
++void WindowHideState::FinishHideDrainTimeout(const uint64_t generation) {
++  // Still Hidden rather than Visible: the view IS parked, and a show must
++  // unpark it. Reporting kDrainTimeout (and minimized=false) is how the
++  // caller learns the hide was not clean.
++  CompleteHide(generation, Result{Outcome::kDrainTimeout, /*parked=*/true,
++                                 /*minimized=*/false});
++}
++
++void WindowHideState::FinishHideNoParking(const uint64_t generation) {
++  std::vector<Waiter> notify;
++  {
++    const std::lock_guard<std::mutex> lock(mutex_);
++    if (generation_ != generation) {
++      return;
++    }
++    parked_ = false;
++    minimized_ = false;
++    state_ = State::kVisible;  // nothing was hidden
++    notify.swap(hide_waiters_);
++    for (auto& waiter : notify) {
++      waiter.result = Result{Outcome::kNotParked, /*parked=*/false,
++                            /*minimized=*/false};
++    }
++  }
++  RunWaiters(notify);
++}
++
++void WindowHideState::CompleteHide(const uint64_t generation,
++                                   const Result result) {
++  std::vector<Waiter> notify;
++  {
++    const std::lock_guard<std::mutex> lock(mutex_);
++    if (generation_ != generation) {
++      return;  // a show (or a fresh hide) superseded us; it owns the state
++    }
++    parked_ = result.parked;
++    minimized_ = result.minimized;
++    state_ = State::kHidden;
++    notify.swap(hide_waiters_);
++    for (auto& waiter : notify) {
++      waiter.result = result;
++    }
++  }
++  RunWaiters(notify);
++}
++
++void WindowHideState::BeginShow(const uint64_t generation) {
++  if (CurrentGeneration() != generation) {
++    return;
++  }
++
++  // Restore first, then unpark: showing a window whose frames are still
++  // withheld would leave it black until something else scheduled a frame.
++  const auto finish = [this, generation](const bool ok, const bool minimized) {
++    if (CurrentGeneration() != generation) {
++      return;  // superseded while the compositor was answering
++    }
++    if (hooks_.unpark) {
++      hooks_.unpark();
++    }
++    // False only if parking had no effect to begin with (no provider), in
++    // which case frames were never stopped — which is what !parked reports.
++    const bool parked = hooks_.is_parked ? hooks_.is_parked() : false;
++
++    std::vector<Waiter> notify;
++    {
++      const std::lock_guard<std::mutex> lock(mutex_);
++      if (generation_ != generation) {
++        return;
++      }
++      parked_ = parked;
++      minimized_ = minimized;
++      state_ = State::kVisible;
++      notify.swap(show_waiters_);
++      for (auto& waiter : notify) {
++        waiter.result = Result{ok ? Outcome::kOk : Outcome::kRestoreFailed,
++                               parked, minimized};
++      }
++    }
++    RunWaiters(notify);
++  };
++
++  if (!hooks_.restore) {
++    finish(/*ok=*/true, /*minimized=*/false);
++    return;
++  }
++  hooks_.restore(finish);
++}
++
++}  // namespace ivi
+diff --git a/shell/view/window_hide_state.h b/shell/view/window_hide_state.h
+new file mode 100644
+index 00000000..1ca8ba7a
+--- /dev/null
++++ b/shell/view/window_hide_state.h
+@@ -0,0 +1,191 @@
++/*
++ * Copyright 2026 Toyota Connected North America
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef SHELL_VIEW_WINDOW_HIDE_STATE_H_
++#define SHELL_VIEW_WINDOW_HIDE_STATE_H_
++
++#include <cstdint>
++#include <functional>
++#include <mutex>
++#include <vector>
++
++namespace ivi {
++
++/**
++ * @brief State machine behind the sigg_launcher/window channel's hide/show.
++ *
++ *     Visible --hide--> Hiding --drained--> Hidden --show--> Showing
++ *        ^                                                        |
++ *        +---------------------- done ----------------------------+
++ *
++ * Hiding parks vsync first (which stops NEW frames), then waits until no
++ * frame is still in flight (IVsyncProvider::FramesInFlight() == 0), and only
++ * then minimizes the toplevel. That order is the whole point: a frame already
++ * being built when hide arrived would otherwise commit after the window is
++ * gone. The wait is bounded by kDrainTimeoutMs; on expiry the view stays
++ * parked and the caller gets kDrainTimeout rather than a false success.
++ *
++ * Transition rules (all well-defined, all thread-safe):
++ *
++ * - hide() in Visible: starts the hide (park -> drain -> minimize).
++ * - hide() in Hiding:  joins the hide already running; the caller is answered
++ *   when it finishes. No second park, no second drain.
++ * - hide() in Hidden:  no-op, answered immediately with the current result.
++ * - hide() in Showing: supersedes the show. Its waiters are answered
++ *   kCancelled, its in-flight restore completion is ignored (generation
++ *   counter), and a fresh hide starts from wherever the show got to — its
++ *   park/unpark is re-applied from scratch, so the end state is correct
++ *   either way.
++ * - show() in Hidden:  starts the show (restore -> unpark).
++ * - show() in Showing: joins the show already running.
++ * - show() in Hiding:  cancels the hide the same way (waiters get
++ *   kCancelled) and shows. The half-finished hide's park is undone by the
++ *   show's unpark, so this cannot strand the view parked.
++ * - show() in Visible: no-op, answered immediately.
++ *
++ * Every request's callback runs exactly once, unless the transition it joined
++ * was superseded — then kCancelled. Callbacks are invoked outside the lock;
++ * the owner of the hooks must arrange the thread they run on (FlutterView
++ * marshals onto the platform task thread, because the reply has to reach a
++ * flutter::MethodResult there).
++ *
++ * The class is deliberately free of Wayland, Flutter and asio: the hooks are
++ * injected, so the whole machine is unit-testable with no display attached.
++ */
++class WindowHideState {
++ public:
++  enum class State {
++    kVisible,  // running and shown
++    kHiding,   // park/drain/minimize in progress
++    kHidden,   // parked (and minimized, if the compositor supports it)
++    kShowing,  // restore/unpark in progress
++  };
++
++  enum class Outcome {
++    kOk,               // reached the requested end state
++    kDrainTimeout,     // parked, but a frame was still in flight at the
++                       // deadline — NOT minimized (see below)
++    kNotParked,        // parking did not take effect (no vsync provider), so
++                       // frames are still being produced; nothing was hidden
++    kCancelled,        // a later hide/show superseded this request
++    kMinimizeFailed,   // compositor never confirmed minimize (hide)
++    kRestoreFailed,    // compositor never confirmed restore (show)
++  };
++
++  /// What the channel turns into its result map {parked, minimized} plus,
++  /// for anything but kOk, a PlatformException.
++  struct Result {
++    Outcome outcome = Outcome::kOk;
++    bool parked = false;      // vsync is stopped (frames are not being made)
++    bool minimized = false;   // compositor reports our toplevel minimized
++  };
++
++  using Done = std::function<void(Result)>;
++
++  /// Everything the machine needs from the outside world. Called outside the
++  /// machine's lock; async hooks must complete by invoking their callback,
++  /// exactly once, from whatever thread they finish on.
++  struct Hooks {
++    /// Withhold the vsync baton (FlutterView::Hide()).
++    std::function<void()> park;
++    /// Give the baton back (FlutterView::Show()).
++    std::function<void()> unpark;
++    /// True when parking actually stopped frame production. False means no
++    /// wp_presentation provider, so parking was a no-op.
++    std::function<bool()> is_parked;
++    /// True while a frame handed to the engine has not been presented yet.
++    std::function<bool()> frame_in_flight;
++    /// Run @p fn after @p delay_ms, off the caller's stack. Production wires
++    /// this to an asio timer on the platform task thread; tests drive it.
++    std::function<void(int delay_ms, std::function<void()> fn)> schedule;
++    /// Compositor minimize of our toplevel. Reports (ok, minimized).
++    /// Until the foreign-toplevel wiring exists this is an immediate
++    /// (true, false): parked but visibly still on screen, and Dart is told.
++    std::function<void(std::function<void(bool, bool)> done)> minimize;
++    /// Compositor restore of our toplevel. Reports (ok, minimized).
++    std::function<void(std::function<void(bool, bool)> done)> restore;
++  };
++
++  /// How long hide waits for the in-flight frame to be presented before it
++  /// gives up (staying parked). 500 ms is ~30 refreshes at 60 Hz: far longer
++  /// than any single frame, short enough that a wedged compositor cannot
++  /// stall the launcher's hide for long.
++  static constexpr int kDrainTimeoutMs = 500;
++  /// Poll interval for that wait.
++  static constexpr int kDrainPollMs = 5;
++  /// The deadline is attempts x poll interval rather than a wall-clock
++  /// timestamp, so the timeout is reachable in a unit test without
++  /// injecting a clock: kDrainTimeoutMs / kDrainPollMs polls.
++  static constexpr int kDrainAttempts = kDrainTimeoutMs / kDrainPollMs;
++
++  explicit WindowHideState(Hooks hooks);
++  ~WindowHideState() = default;
++
++  WindowHideState(const WindowHideState&) = delete;
++  WindowHideState& operator=(const WindowHideState&) = delete;
++
++  /// Begin (or join) a hide. @p done runs exactly once — with kCancelled if a
++  /// show supersedes it first. Safe from any thread.
++  void Hide(Done done);
++
++  /// Begin (or join) a show. Same contract as Hide(). Safe from any thread.
++  void Show(Done done);
++
++  [[nodiscard]] State GetState() const;
++
++  /// Stable lowercase name for the channel's read-only "state" method.
++  static const char* StateName(State state);
++
++ private:
++  // A waiter plus the result it will be answered with.
++  struct Waiter {
++    Done done;
++    Result result;
++  };
++
++  // Generation of the transition currently in flight. Bumped whenever a new
++  // transition starts or supersedes another, so an async step belonging to a
++  // superseded transition can spot that its answer is stale and drop it.
++  [[nodiscard]] uint64_t CurrentGeneration() const;
++
++  void BeginHide(uint64_t generation);
++  void PollDrain(uint64_t generation, int attempts_left);
++  void FinishHideDrained(uint64_t generation);
++  void FinishHideNoParking(uint64_t generation);
++  void FinishHideDrainTimeout(uint64_t generation);
++  void CompleteHide(uint64_t generation, Result result);
++  void BeginShow(uint64_t generation);
++
++  /// Answer a batch of waiters. Always called with the mutex released: a
++  /// waiter is a channel reply, and running it under the lock would let a
++  /// re-entrant Hide/Show deadlock against it.
++  static void RunWaiters(std::vector<Waiter>& waiters);
++
++  mutable std::mutex mutex_;
++  State state_ = State::kVisible;
++  uint64_t generation_ = 0;
++  std::vector<Waiter> hide_waiters_;
++  std::vector<Waiter> show_waiters_;
++  // Last known compositor/window facts, reported back to every requester.
++  bool parked_ = false;
++  bool minimized_ = false;
++
++  const Hooks hooks_;
++};
++
++}  // namespace ivi
++
++#endif  // SHELL_VIEW_WINDOW_HIDE_STATE_H_
+diff --git a/shell/vsync/ivsync_provider.cc b/shell/vsync/ivsync_provider.cc
+index bdb301c5..83809ad6 100644
+--- a/shell/vsync/ivsync_provider.cc
++++ b/shell/vsync/ivsync_provider.cc
+@@ -238,6 +238,10 @@ void IVsyncProvider::EnableProfile(const bool enabled, std::string label) {
+ }
+ 
+ void IVsyncProvider::DeliverVsync(const uint64_t frame_start_ns) {
++  // The frame the engine was building (or has committed) reached the screen:
++  // retire it before anything below can return early. Parked still retires --
++  // the last frame before hide must be able to finish draining.
++  NoteFrameRetired();
+   if (profile_enabled_) {
+     // Real present — record the inter-present interval from its timestamp.
+     profile_.Record(profile_label_, /*ok=*/true, frame_start_ns);
+@@ -272,6 +276,10 @@ bool IVsyncProvider::DeferToPace() {
+ }
+ 
+ void IVsyncProvider::DeliverDiscard() {
++  // Retire before the parked early-return: a commit dropped while we hide
++  // still ends that frame's flight, and leaving it counted would make hide
++  // wait for a present that will never come.
++  NoteFrameRetired();
+   if (parked_.load(std::memory_order_acquire)) {
+     return;  // parked: the baton stays held, and this is not a dropped frame
+   }
+@@ -396,9 +404,33 @@ void IVsyncProvider::PostOnVsync(FLUTTER_API_SYMBOL(FlutterEngine) engine,
+              [engine, baton, start_ns, target_ns]() {
+                LibFlutterEngine->OnVsync(engine, baton, start_ns, target_ns);
+              });
++  // The baton is on its way to Flutter, which will build the frame it drives.
++  // Counted here, at the only place a baton leaves this class, so the counter
++  // means exactly "handed out and not yet presented/discarded".
++  NoteFrameHandedOut();
++}
++
++void IVsyncProvider::NoteFrameHandedOut() {
++  frames_in_flight_.fetch_add(1, std::memory_order_acq_rel);
++}
++
++void IVsyncProvider::NoteFrameRetired() {
++  // Saturating: a source event with nothing counted (a redundant present, or
++  // one for a frame whose baton was never handed out because we were parked)
++  // must not underflow the counter into a value hide would wait on forever.
++  uint32_t observed = frames_in_flight_.load(std::memory_order_acquire);
++  while (observed != 0 &&
++         !frames_in_flight_.compare_exchange_weak(
++             observed, observed - 1, std::memory_order_acq_rel,
++             std::memory_order_acquire)) {
++    // compare_exchange_weak reloaded observed; retry until it hits 0 or wins.
++  }
+ }
+ 
+ void IVsyncProvider::Stop() {
++  // There is no frame left to wait for once the source is gone; a stale count
++  // would make a later drain-timeout fire for nothing.
++  frames_in_flight_.store(0, std::memory_order_release);
+   // Unanswered baton is a documented leak, not a crash — Flutter is shutting
+   // down. Clearing engine/runner makes any late source event a no-op.
+   vsync_baton_.store(0, std::memory_order_release);
+diff --git a/shell/vsync/ivsync_provider.h b/shell/vsync/ivsync_provider.h
+index 44192cc6..bb38a8dd 100644
+--- a/shell/vsync/ivsync_provider.h
++++ b/shell/vsync/ivsync_provider.h
+@@ -136,6 +136,33 @@ class IVsyncProvider {
+     return parked_.load(std::memory_order_acquire);
+   }
+ 
++  /// Frames handed to the engine whose presentation (or discard) the source
++  /// has not yet reported — i.e. a frame is still in flight.
++  ///
++  /// Precisely: incremented in PostOnVsync() at the moment the baton is queued
++  /// for FlutterEngineOnVsync (so the engine is about to build that frame, or
++  /// already is), decremented when the source reports that frame's outcome —
++  /// DeliverVsync() for a real presentation (Wayland: wp_presentation
++  /// `presented`, wayland_vsync_provider.cc OnPresented) or DeliverDiscard()
++  /// for a dropped commit (its `discarded`). Both directions are saturating
++  /// against a mis-counted source event, so it can never go negative.
++  ///
++  /// 0 therefore means the pipeline is drained: everything the engine was
++  /// building has reached the screen. That is what the sigg_launcher/window
++  /// hide path waits for before it minimizes, so no frame can commit after
++  /// the window is gone.
++  ///
++  /// A parked baton (the engine asked, we are not answering) is deliberately
++  /// NOT counted: it starts no frame and will never be presented until
++  /// unparked, so waiting on it would deadlock hide against itself.
++  ///
++  /// Not counted: platform-view/subsurface buffers, which commit on their own
++  /// wl_surface outside this baton machinery (see the phase 2 platform-view
++  /// notes).
++  [[nodiscard]] uint32_t FramesInFlight() const {
++    return frames_in_flight_.load(std::memory_order_acquire);
++  }
++
+   /// Hand Flutter at most one vsync per refresh, on the display's vblanks.
+   ///
+   /// Without it a request made while nothing is in flight is answered at once,
+@@ -271,6 +298,10 @@ class IVsyncProvider {
+   // vsync_baton_ instead of posting it, and SetParked(false) delivers it.
+   std::atomic<bool> parked_{false};
+ 
++  // Frames handed to the engine and not yet reported presented/discarded.
++  // See FramesInFlight().
++  std::atomic<uint32_t> frames_in_flight_{0};
++
+   // Marshal one OnVsync onto the runner's strand. No-op when the runner is not
+   // wired (the caller must leave the baton parked in that case). @p start_ns
+   // is the frame's start and input cutoff, @p target_ns the vblank it is for.
+@@ -282,6 +313,11 @@ class IVsyncProvider {
+   // Hands out a parked baton now. @p vblank_ns is the vblank that begins the
+   // frame's refresh; 0 means an unpaced frame starting at the current time.
+   void DrainParkedBaton(uint64_t vblank_ns = 0);
++  // Frame-lifecycle bookkeeping behind FramesInFlight(): HandedOut when the
++  // baton is queued for the engine, Retired when the source reports the
++  // present/discard of that frame.
++  void NoteFrameHandedOut();
++  void NoteFrameRetired();
+   // Exchange the parked baton out and marshal it (no profiling — the public
+   // DeliverVsync/DeliverDiscard wrappers record the present/discard).
+   // @p on_vblank: @p now_ns is the vblank that begins the frame's refresh;
+diff --git a/test/unit_test/CMakeLists.txt b/test/unit_test/CMakeLists.txt
+index c5f78dca..484f7188 100644
+--- a/test/unit_test/CMakeLists.txt
++++ b/test/unit_test/CMakeLists.txt
+@@ -312,6 +312,8 @@ add_subdirectory(watchdog-test)
+ # Hidden-launcher contract: watchdog liveness comes from the App heartbeat
+ # pets, not from frame production (see watchdog_heartbeat-test's header).
+ add_subdirectory(watchdog_heartbeat-test)
++# Hide/show state machine — no Wayland/Flutter needed, runs anywhere.
++add_subdirectory(window_hide_state-test)
+ add_subdirectory(wake_event_fd-test)
+ add_subdirectory(libinput_log-test)
+ add_subdirectory(partial_repaint_gate-test)
+diff --git a/test/unit_test/window_hide_state-test/CMakeLists.txt b/test/unit_test/window_hide_state-test/CMakeLists.txt
+new file mode 100644
+index 00000000..5ef882db
+--- /dev/null
++++ b/test/unit_test/window_hide_state-test/CMakeLists.txt
+@@ -0,0 +1,32 @@
++#
++# Copyright 2026 Toyota Connected North America
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#      http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++#
++
++# Unit test for WindowHideState, the hide/show state machine behind the
++# sigg_launcher/window channel. It is deliberately free of Wayland/Flutter:
++# every side effect is an injected hook, so the machine runs on a plain thread
++# pool with no display attached.
++set(TESTCASE_NAME "homescreen_window_hide_state_ut_test_driver")
++
++add_executable(${TESTCASE_NAME} test_case_window_hide_state.cc
++        ${PROJECT_SOURCE_DIR}/shell/view/window_hide_state.cc)
++add_sanitizers(${TESTCASE_NAME})
++target_include_directories(${TESTCASE_NAME} PRIVATE ${PROJECT_SOURCE_DIR})
++target_link_libraries(${TESTCASE_NAME} PRIVATE gtest_main)
++
++add_test(
++        NAME ${TESTCASE_NAME}
++        COMMAND ${TESTCASE_NAME}
++)
+diff --git a/test/unit_test/window_hide_state-test/test_case_window_hide_state.cc b/test/unit_test/window_hide_state-test/test_case_window_hide_state.cc
+new file mode 100644
+index 00000000..99bfe7ba
+--- /dev/null
++++ b/test/unit_test/window_hide_state-test/test_case_window_hide_state.cc
+@@ -0,0 +1,466 @@
++/*
++ * Copyright 2026 Toyota Connected North America
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++// Unit tests for WindowHideState — the hide/show state machine behind the
++// sigg_launcher/window channel.
++//
++// The machine has no Wayland/Flutter dependencies: every side effect is an
++// injected hook, so these tests run on a plain thread pool with no display,
++// no compositor and no engine attached.
++//
++// Hooks:
++//   park/unpark   : record calls, toggle m_parked.
++//   is_parked     : returns m_parked.
++//   frame_in_flight: returns true while m_inflight_polls > 0, decrementing
++//                    on each PollDrain call.
++//   schedule      : defers fn to a queue; the test drives it with Tick().
++//   minimize/restore: either complete immediately (done() synchronously) or
++//                     defer to a queue, controlled by defer_minimize/defer_restore.
++//                     Deferred completions are run with RunDeferred().
++//
++// Results are collected through std::promise/future. Tests fire an operation,
++// drive the schedule/deferred queues as needed, then .get() the future. This
++// makes hide/show races deterministic: a show issued before the drain ticks
++// lands mid-drain and cancels the hide.
++
++#include <functional>
++#include <future>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <vector>
++
++#include <gtest/gtest.h>
++
++#include "shell/view/window_hide_state.h"
++
++using ivi::WindowHideState;
++
++namespace {
++
++struct Hooks {
++  std::atomic<bool> parked_result{true};  // is_parked(): did parking take effect?
++  std::atomic<int> inflight_polls{0};     // frame_in_flight true this many times
++  int park_calls = 0;
++  int unpark_calls = 0;
++  int minimize_calls = 0;
++  int restore_calls = 0;
++  bool defer_minimize = false;
++  bool defer_restore = false;
++  bool minimize_ok = true;
++  bool restore_ok = true;
++  bool minimize_minimized = true;
++  bool restore_minimized = false;
++
++  std::mutex mu;
++  struct Deferred {
++    std::function<void(bool, bool)> done;
++    bool ok;
++    bool minimized;
++  };
++  std::vector<Deferred> deferred;
++  std::vector<std::function<void()>> scheduled;
++
++  void Install(WindowHideState::Hooks& out) {
++    out.park = [this] {
++      std::lock_guard<std::mutex> lock(mu);
++      ++park_calls;
++      // park() requests parking; whether it took effect is reported by
++      // is_parked() (a missing vsync provider leaves it false).
++    };
++    out.unpark = [this] {
++      std::lock_guard<std::mutex> lock(mu);
++      ++unpark_calls;
++      parked_result.store(false, std::memory_order_release);
++    };
++    out.is_parked = [this] { return parked_result.load(std::memory_order_acquire); };
++    out.frame_in_flight = [this] {
++      return inflight_polls.fetch_sub(1, std::memory_order_acq_rel) > 0;
++    };
++    out.schedule = [this](int /*delay_ms*/, std::function<void()> fn) {
++      std::lock_guard<std::mutex> lock(mu);
++      scheduled.push_back(std::move(fn));
++    };
++    out.minimize = [this](std::function<void(bool, bool)> done) {
++      std::lock_guard<std::mutex> lock(mu);
++      ++minimize_calls;
++      if (defer_minimize) {
++        deferred.push_back({std::move(done), minimize_ok, minimize_minimized});
++      } else {
++        done(minimize_ok, minimize_minimized);
++      }
++    };
++    out.restore = [this](std::function<void(bool, bool)> done) {
++      std::lock_guard<std::mutex> lock(mu);
++      ++restore_calls;
++      if (defer_restore) {
++        deferred.push_back({std::move(done), restore_ok, restore_minimized});
++      } else {
++        done(restore_ok, restore_minimized);
++      }
++    };
++  }
++
++  // Run one scheduled drain poll (may schedule more; run until empty to
++  // complete a drain).
++  void TickOne() {
++    std::function<void()> fn;
++    {
++      std::lock_guard<std::mutex> lock(mu);
++      if (scheduled.empty()) {
++        return;
++      }
++      fn = std::move(scheduled.front());
++      scheduled.erase(scheduled.begin());
++    }
++    fn();
++  }
++
++  void DrainAll() {
++    while (true) {
++      std::function<void()> fn;
++      {
++        std::lock_guard<std::mutex> lock(mu);
++        if (scheduled.empty()) {
++          return;
++        }
++        fn = std::move(scheduled.front());
++        scheduled.erase(scheduled.begin());
++      }
++      fn();
++    }
++  }
++
++  void RunDeferred() {
++    std::vector<Deferred> batch;
++    {
++      std::lock_guard<std::mutex> lock(mu);
++      batch.swap(deferred);
++    }
++    for (auto& d : batch) {
++      d.done(d.ok, d.minimized);
++    }
++  }
++};
++
++// Fire an operation, return its future without blocking. The caller drives
++// Tick()/RunDeferred() and then .get()s. The promise is heap-backed so it
++// outlives Fire() — the callback may run later, once the drain/deferred
++// queues are driven.
++std::future<WindowHideState::Result> Fire(WindowHideState& machine,
++                                          void (WindowHideState::*fn)(
++                                              WindowHideState::Done)) {
++  auto p = std::make_shared<std::promise<WindowHideState::Result>>();
++  auto f = p->get_future();
++  (machine.*fn)([p](const WindowHideState::Result& r) { p->set_value(r); });
++  return f;
++}
++
++}  // namespace
++
++TEST(WindowHideState, HideVisibleDrainsAndMinimizes) {
++  Hooks hooks;
++  WindowHideState::Hooks h;
++  hooks.Install(h);
++  WindowHideState machine(h);
++
++  auto f = Fire(machine, &WindowHideState::Hide);
++  hooks.DrainAll();         // drain: no frames in flight → minimize immediately
++  hooks.RunDeferred();      // complete the (immediate) minimize
++
++  auto r = f.get();
++  EXPECT_EQ(WindowHideState::Outcome::kOk, r.outcome);
++  EXPECT_TRUE(r.parked);
++  EXPECT_TRUE(r.minimized);
++  EXPECT_EQ(1, hooks.park_calls);
++  EXPECT_EQ(1, hooks.minimize_calls);
++  EXPECT_EQ(WindowHideState::State::kHidden, machine.GetState());
++}
++
++TEST(WindowHideState, HideWaitsForInFlightThenMinimizes) {
++  Hooks hooks;
++  hooks.inflight_polls.store(3);  // three frames drain one poll at a time
++  WindowHideState::Hooks h;
++  hooks.Install(h);
++  WindowHideState machine(h);
++
++  auto f = Fire(machine, &WindowHideState::Hide);
++  hooks.DrainAll();   // 3 polls, then frame_in_flight false → minimize
++
++  auto r = f.get();
++  EXPECT_EQ(WindowHideState::Outcome::kOk, r.outcome);
++  EXPECT_TRUE(r.parked);
++  EXPECT_TRUE(r.minimized);
++  EXPECT_EQ(1, hooks.park_calls);       // parked once, not per frame
++  EXPECT_EQ(1, hooks.minimize_calls);
++  EXPECT_EQ(WindowHideState::State::kHidden, machine.GetState());
++}
++
++TEST(WindowHideState, HideDrainTimeoutStaysParked) {
++  Hooks hooks;
++  hooks.inflight_polls.store(WindowHideState::kDrainAttempts + 5); // never drains
++  WindowHideState::Hooks h;
++  hooks.Install(h);
++  WindowHideState machine(h);
++
++  auto f = Fire(machine, &WindowHideState::Hide);
++  hooks.DrainAll();   // kDrainAttempts polls then gives up
++
++  auto r = f.get();
++  EXPECT_EQ(WindowHideState::Outcome::kDrainTimeout, r.outcome);
++  EXPECT_TRUE(r.parked);     // still parked — frame production stopped
++  EXPECT_FALSE(r.minimized); // but not minimized
++  EXPECT_EQ(WindowHideState::State::kHidden, machine.GetState());
++  EXPECT_EQ(1, hooks.park_calls);  // park once; polls don't re-park
++  EXPECT_EQ(0, hooks.minimize_calls);  // never reached minimize
++}
++
++TEST(WindowHideState, HideNotParkedReportsErrorStaysVisible) {
++  Hooks hooks;
++  hooks.parked_result.store(false);
++  WindowHideState::Hooks h;
++  hooks.Install(h);
++  WindowHideState machine(h);
++
++  auto r = Fire(machine, &WindowHideState::Hide).get();
++
++  EXPECT_EQ(WindowHideState::Outcome::kNotParked, r.outcome);
++  EXPECT_FALSE(r.parked);
++  EXPECT_FALSE(r.minimized);
++  EXPECT_EQ(WindowHideState::State::kVisible, machine.GetState());
++  EXPECT_EQ(1, hooks.park_calls);
++  EXPECT_EQ(0, hooks.minimize_calls);
++}
++
++TEST(WindowHideState, ShowHiddenRestoresAndUnparks) {
++  Hooks hooks;
++  WindowHideState::Hooks h;
++  hooks.Install(h);
++  WindowHideState machine(h);
++  // Enter Hidden.
++  {
++    auto f = Fire(machine, &WindowHideState::Hide);
++    hooks.DrainAll();
++    hooks.RunDeferred();
++    ASSERT_EQ(WindowHideState::Outcome::kOk, f.get().outcome);
++    EXPECT_EQ(WindowHideState::State::kHidden, machine.GetState());
++  }
++
++  auto f = Fire(machine, &WindowHideState::Show);
++  hooks.RunDeferred();   // complete the (immediate) restore
++
++  auto r = f.get();
++  EXPECT_EQ(WindowHideState::Outcome::kOk, r.outcome);
++  EXPECT_FALSE(r.parked);
++  EXPECT_FALSE(r.minimized);
++  EXPECT_EQ(1, hooks.restore_calls);
++  EXPECT_EQ(1, hooks.unpark_calls);
++  EXPECT_EQ(WindowHideState::State::kVisible, machine.GetState());
++}
++
++TEST(WindowHideState, ShowVisibleIsNoop) {
++  Hooks hooks;
++  WindowHideState::Hooks h;
++  hooks.Install(h);
++  WindowHideState machine(h);
++
++  auto r = Fire(machine, &WindowHideState::Show).get();
++
++  EXPECT_EQ(WindowHideState::Outcome::kOk, r.outcome);
++  EXPECT_EQ(0, hooks.restore_calls);
++  EXPECT_EQ(0, hooks.unpark_calls);
++  EXPECT_EQ(WindowHideState::State::kVisible, machine.GetState());
++}
++
++TEST(WindowHideState, HideHiddenIsNoop) {
++  Hooks hooks;
++  WindowHideState::Hooks h;
++  hooks.Install(h);
++  WindowHideState machine(h);
++  {
++    auto f = Fire(machine, &WindowHideState::Hide);
++    hooks.DrainAll();
++    hooks.RunDeferred();
++    ASSERT_EQ(WindowHideState::Outcome::kOk, f.get().outcome);
++    EXPECT_EQ(WindowHideState::State::kHidden, machine.GetState());
++  }
++
++  auto r = Fire(machine, &WindowHideState::Hide).get();
++
++  EXPECT_EQ(WindowHideState::Outcome::kOk, r.outcome);
++  EXPECT_TRUE(r.parked);
++  EXPECT_EQ(WindowHideState::State::kHidden, machine.GetState());
++}
++
++TEST(WindowHideState, HideJoinsWhileHiding) {
++  Hooks hooks;
++  hooks.inflight_polls.store(2);
++  WindowHideState::Hooks h;
++  hooks.Install(h);
++  WindowHideState machine(h);
++
++  std::promise<WindowHideState::Result> p2;
++  auto f2 = p2.get_future();
++  machine.Hide([&p2](const WindowHideState::Result& r) { p2.set_value(r); });
++
++  auto f1 = Fire(machine, &WindowHideState::Hide);
++  hooks.DrainAll();
++  hooks.RunDeferred();
++
++  auto r1 = f1.get();
++  auto r2 = f2.get();
++
++  EXPECT_EQ(WindowHideState::Outcome::kOk, r1.outcome);
++  EXPECT_EQ(WindowHideState::Outcome::kOk, r2.outcome);
++  EXPECT_TRUE(r1.parked);
++  EXPECT_EQ(1, hooks.park_calls);       // single park shared by both
++  EXPECT_EQ(1, hooks.minimize_calls);
++}
++
++TEST(WindowHideState, ShowCancelsHiding) {
++  Hooks hooks;
++  hooks.inflight_polls.store(WindowHideState::kDrainAttempts + 5); // never drains
++  WindowHideState::Hooks h;
++  hooks.Install(h);
++  WindowHideState machine(h);
++
++  // Fire hide: it begins draining but we never Tick, so it stays mid-drain.
++  std::promise<WindowHideState::Result> p_hide;
++  auto f_hide = p_hide.get_future();
++  machine.Hide([&p_hide](const WindowHideState::Result& r) { p_hide.set_value(r); });
++
++  // Show arrives while hiding: cancels the hide and shows.
++  auto f_show = Fire(machine, &WindowHideState::Show);
++  hooks.RunDeferred();   // complete show's (immediate) restore
++
++  auto r_show = f_show.get();
++  auto r_hide = f_hide.get();
++
++  EXPECT_EQ(WindowHideState::Outcome::kOk, r_show.outcome);
++  EXPECT_EQ(WindowHideState::Outcome::kCancelled, r_hide.outcome);
++  EXPECT_EQ(WindowHideState::State::kVisible, machine.GetState());
++}
++
++TEST(WindowHideState, HideCancelsShowing) {
++  Hooks hooks;
++  WindowHideState::Hooks h;
++  hooks.Install(h);
++  WindowHideState machine(h);
++  // Enter Hidden.
++  {
++    auto f = Fire(machine, &WindowHideState::Hide);
++    hooks.DrainAll();
++    hooks.RunDeferred();
++    ASSERT_EQ(WindowHideState::Outcome::kOk, f.get().outcome);
++    EXPECT_EQ(WindowHideState::State::kHidden, machine.GetState());
++  }
++
++  // Fire show with a deferred restore (slow compositor).
++  std::promise<WindowHideState::Result> p_show;
++  auto f_show = p_show.get_future();
++  machine.Show([&p_show](const WindowHideState::Result& r) { p_show.set_value(r); });
++  // restore is deferred: f_show not yet satisfied.
++
++  // Hide supersedes the in-flight show: show waiter gets kCancelled.
++  auto f_hide = Fire(machine, &WindowHideState::Hide);
++  hooks.DrainAll();
++  hooks.RunDeferred();
++
++  auto r_hide = f_hide.get();
++  auto r_show = f_show.get();
++
++  EXPECT_EQ(WindowHideState::Outcome::kOk, r_hide.outcome);
++  EXPECT_EQ(WindowHideState::Outcome::kCancelled, r_show.outcome);
++  EXPECT_EQ(WindowHideState::State::kHidden, machine.GetState());
++}
++
++TEST(WindowHideState, MinimizeFailureReportsErrorStaysParked) {
++  Hooks hooks;
++  hooks.minimize_ok = false;  // compositor never confirmed minimize
++  WindowHideState::Hooks h;
++  hooks.Install(h);
++  WindowHideState machine(h);
++
++  auto f = Fire(machine, &WindowHideState::Hide);
++  hooks.DrainAll();
++  hooks.RunDeferred();
++
++  auto r = f.get();
++  EXPECT_EQ(WindowHideState::Outcome::kMinimizeFailed, r.outcome);
++  EXPECT_TRUE(r.parked);
++  EXPECT_FALSE(r.minimized);
++  EXPECT_EQ(WindowHideState::State::kHidden, machine.GetState());
++}
++
++TEST(WindowHideState, RestoreFailureReportsError) {
++  Hooks hooks;
++  WindowHideState::Hooks h;
++  hooks.Install(h);
++  WindowHideState machine(h);
++  {
++    auto f = Fire(machine, &WindowHideState::Hide);
++    hooks.DrainAll();
++    hooks.RunDeferred();
++    ASSERT_EQ(WindowHideState::Outcome::kOk, f.get().outcome);
++    EXPECT_EQ(WindowHideState::State::kHidden, machine.GetState());
++  }
++
++  hooks.restore_ok = false;
++  auto f = Fire(machine, &WindowHideState::Show);
++  hooks.RunDeferred();
++
++  auto r = f.get();
++  EXPECT_EQ(WindowHideState::Outcome::kRestoreFailed, r.outcome);
++  EXPECT_EQ(WindowHideState::State::kVisible, machine.GetState());
++}
++
++TEST(WindowHideState, DeferredMinimizeSupersededByShow) {
++  Hooks hooks;
++  hooks.defer_minimize = true;  // slow compositor: minimize completes later
++  WindowHideState::Hooks h;
++  hooks.Install(h);
++  WindowHideState machine(h);
++
++  // Hide starts minimize, deferred.
++  std::promise<WindowHideState::Result> p_hide;
++  auto f_hide = p_hide.get_future();
++  machine.Hide([&p_hide](const WindowHideState::Result& r) { p_hide.set_value(r); });
++  ASSERT_EQ(1, hooks.minimize_calls);
++  ASSERT_EQ(1u, [&] {
++    std::lock_guard<std::mutex> lock(hooks.mu);
++    return hooks.deferred.size();
++  }());
++
++  // Show arrives before minimize confirms: cancels hide, shows immediately.
++  auto f_show = Fire(machine, &WindowHideState::Show);
++  hooks.RunDeferred();   // completes show's restore (immediate)
++  auto r_show = f_show.get();
++  EXPECT_EQ(WindowHideState::Outcome::kOk, r_show.outcome);
++  EXPECT_EQ(WindowHideState::State::kVisible, machine.GetState());
++
++  // The deferred minimize completion is stale (superseded): running it must
++  // not flip the machine back to Hidden or answer the hide waiter with kOk.
++  hooks.RunDeferred();
++  EXPECT_EQ(WindowHideState::State::kVisible, machine.GetState());
++  EXPECT_EQ(WindowHideState::Outcome::kCancelled, f_hide.get().outcome);
++}
++
++TEST(WindowHideState, StateNames) {
++  EXPECT_STREQ("visible", WindowHideState::StateName(WindowHideState::State::kVisible));
++  EXPECT_STREQ("hiding", WindowHideState::StateName(WindowHideState::State::kHiding));
++  EXPECT_STREQ("hidden", WindowHideState::StateName(WindowHideState::State::kHidden));
++  EXPECT_STREQ("showing", WindowHideState::StateName(WindowHideState::State::kShowing));
++}
