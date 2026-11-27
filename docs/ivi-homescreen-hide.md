@@ -130,21 +130,54 @@ on this surface" (`/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml:
 
 ## State machine
 
+**[VERIFIED]** — implemented in `shell/view/window_hide_state.{h,cc}` (part of
+patch `0003-drain-state-machine.patch`), unit-tested in
+`test/unit_test/window_hide_state-test/`.
+
 ```
-Visible -> Hiding -> Hidden -> Showing -> Visible
+Visible --hide--> Hiding --drained--> Hidden --show--> Showing -> Visible
 ```
 
-`hide` must only reply once no frame is in flight (drain outstanding batons /
-track last present). `show` transitions Hidden → Showing → Visible. This
-prevents a frame that started before `hide` from committing after the surface
-is minimized (which would violate "not a single frame while hidden").
+Hide parks vsync first (which stops NEW frames), then waits until no frame is
+still in flight (`IVsyncProvider::FramesInFlight() == 0`, exposed through
+`Backend::FramesInFlight()` → `FlutterView::FramesInFlight()`), and only then
+minimizes. That order is the whole point: a frame already being built when
+hide arrived would otherwise commit after the window is gone.
 
-**Currently unverified:** ivi-homescreen has no exposed "frame in flight"
-counter at the `FlutterView` level. `IVsyncProvider` tracks `source_pending_`
-internally (`shell/vsync/ivsync_provider.h`) but it is not exposed through
-`Backend` or `FlutterView`. The patch may need to add one, or treat `hide` as
-"parking requested" and rely on the minimize + parked vsync to prevent visible
-frames even if one was already in flight.
+The in-flight counter **[VERIFIED against source]**: `IVsyncProvider`
+increments `frames_in_flight_` at baton hand-out in `PostOnVsync()`
+(`shell/vsync/ivsync_provider.cc`, the only place a baton leaves the class)
+and decrements it on `DeliverVsync()` (compositor reported the present,
+`shell/vsync/wayland_vsync_provider.cc OnPresented`) or `DeliverDiscard()`
+(dropped commit). Both directions saturate against mis-counted source events
+so it can never go negative; `Stop()` resets it to 0. A parked baton (engine
+asked, we are not answering) is deliberately NOT counted — it starts no frame,
+so waiting on it would deadlock hide against itself.
+
+The wait is bounded by `kDrainTimeoutMs = 500` (named constant,
+`kDrainPollMs = 5` granularity, `kDrainAttempts = kDrainTimeoutMs /
+kDrainPollMs` polls — reachable in a unit test without injecting a clock).
+On expiry the view stays parked and the caller gets `kDrainTimeout`
+(`minimized=false`) rather than a false success.
+
+Transition rules (all thread-safe via mutex + generation counter, all
+idempotent):
+- hide() in Visible: starts the hide (park → drain → minimize).
+- hide() in Hiding: joins the hide already running.
+- hide() in Hidden: no-op, answered immediately.
+- hide() in Showing: supersedes the show; waiters get kCancelled.
+- show() in Hidden: starts the show (restore → unpark).
+- show() in Showing: joins the show already running.
+- show() in Hiding: cancels the hide (park undone by show's unpark).
+- show() in Visible: no-op.
+
+Every request's callback runs exactly once unless superseded (then kClosed /
+kCancelled). Callbacks run outside the lock; FlutterView marshals them onto
+the platform task thread so they reach the `flutter::MethodResult`.
+
+**No silent failure:** if parking never takes effect (no wp_presentation
+provider), hide reports `kNotParked` ("not-parked") and stays Visible — it
+never pretends the window is hidden while frames are still produced.
 
 ## No silent failure
 
@@ -326,12 +359,17 @@ covers:
    whether parking actually took effect.
 4. `shell/app.cc` — migrate `ApplyOnDisconnect()` to reason-based suspend.
 
-Patch series (each step is its own reviewable file, applied in order):
+Patch series (each step is its own reviewable file, applied in order on top of
+pinned commit `9c6dac86df39961851c1d188c554afe7f6617754`):
 
 - `tool/ivi-homescreen/0001-sigg-window-channel.patch` — step 0, the phase 1
-  channel, fixed so it compiles.
+  channel, fixed so it compiles. [built, unit-tested]
 - `tool/ivi-homescreen/0002-watchdog-heartbeat-test.patch` — step 1, the
   watchdog heartbeat regression test (no production-code change).
+  [built, unit-tested]
+- `tool/ivi-homescreen/0003-drain-state-machine.patch` — step 2, the in-flight
+  counter + WindowHideState drain/minimize state machine + channel contract.
+  [built, unit-tested]
 
 Not in this patch (future work): foreign-toplevel minimize/unset_minimized for
 visual hiding; protocol XML for `zwlr_foreign_toplevel_manager_v1`.
@@ -356,11 +394,17 @@ visual hiding; protocol XML for `zwlr_foreign_toplevel_manager_v1`.
 
 - labwc implements `zwlr_foreign_toplevel-management` with `set_minimized` /
   `unset_minimized` / `activate` (user-stated; not checked against labwc source).
-- `wp_presentation` advertisement on the labwc target.
+- `wp_presentation` advertisement on the labwc target (precondition for
+  parking to take effect; if absent, `hide` returns `not-parked`).
 - Exact `flutter/lifecycle` message format expected by the Flutter engine
   version vendored by ivi-homescreen.
 - That the raster thread services posted callbacks (`PostCallbackOnAllNativeThreads`)
-  while parked — the one load-bearing assumption behind the watchdog verdict
-  above. Engine message-loop sources are not vendored; check on target.
+  while parked — the load-bearing assumption behind the watchdog verdict.
+  Engine message-loop sources are not vendored here; check on target.
 - That all built-in platform views honor `set_suspended`.
-- Whether a frame already in flight at `hide` time can commit after minimize.
+
+The following are now **[VERIFIED]** against source and removed from this list:
+- whether a frame already in flight at `hide` time can commit after minimize
+  (the drain waits for `FramesInFlight() == 0` before minimizing);
+- the watchdog / render-thread coupling (the render-thread pet is a
+  main-thread timer, not per-frame — see the Watchdog section).
