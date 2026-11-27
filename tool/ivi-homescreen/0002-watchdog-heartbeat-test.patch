@@ -1,0 +1,173 @@
+diff --git a/test/unit_test/CMakeLists.txt b/test/unit_test/CMakeLists.txt
+index 84b81350..c5f78dca 100644
+--- a/test/unit_test/CMakeLists.txt
++++ b/test/unit_test/CMakeLists.txt
+@@ -309,6 +309,9 @@ if (BUILD_BACKEND_DRM_KMS_VULKAN)
+ endif ()
+ add_subdirectory(timer-test)
+ add_subdirectory(watchdog-test)
++# Hidden-launcher contract: watchdog liveness comes from the App heartbeat
++# pets, not from frame production (see watchdog_heartbeat-test's header).
++add_subdirectory(watchdog_heartbeat-test)
+ add_subdirectory(wake_event_fd-test)
+ add_subdirectory(libinput_log-test)
+ add_subdirectory(partial_repaint_gate-test)
+diff --git a/test/unit_test/watchdog_heartbeat-test/CMakeLists.txt b/test/unit_test/watchdog_heartbeat-test/CMakeLists.txt
+new file mode 100644
+index 00000000..c09561bf
+--- /dev/null
++++ b/test/unit_test/watchdog_heartbeat-test/CMakeLists.txt
+@@ -0,0 +1,40 @@
++#
++# Copyright 2026 Toyota Connected North America
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#      http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++#
++
++# Watchdog liveness must be driven by the App heartbeat pets, not by frame
++# production: a hidden launcher parks vsync and renders nothing for minutes at
++# a time and must never trip the abort. Links homescreen_ut_shell for the
++# singleton and its logging, as the other shell-unit tests do.
++set(TESTCASE_NAME "homescreen_watchdog_heartbeat_ut_test_driver")
++
++add_executable(${TESTCASE_NAME} test_case_watchdog_heartbeat.cc)
++add_sanitizers(${TESTCASE_NAME})
++target_compile_definitions(${TESTCASE_NAME}
++        PRIVATE SOURCE_ROOT_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
++target_link_libraries(${TESTCASE_NAME} PRIVATE gtest_main homescreen_ut_shell)
++if (BUILD_BACKEND_WAYLAND_EGL)
++    target_link_libraries(${TESTCASE_NAME} PRIVATE PkgConfig::EGL)
++endif ()
++
++add_test(
++        NAME ${TESTCASE_NAME}
++        COMMAND ${TESTCASE_NAME}
++)
++
++# The heartbeat case runs for 3x the configured timeout, so give it room on a
++# loaded builder.
++set_tests_properties(${TESTCASE_NAME} PROPERTIES TIMEOUT 60)
++install(DIRECTORY files DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+diff --git a/test/unit_test/watchdog_heartbeat-test/files/watchdog_config.toml b/test/unit_test/watchdog_heartbeat-test/files/watchdog_config.toml
+new file mode 100644
+index 00000000..d191387d
+--- /dev/null
++++ b/test/unit_test/watchdog_heartbeat-test/files/watchdog_config.toml
+@@ -0,0 +1,6 @@
++[watchdog]
++timeout_ms = 800
++
++[watchdog.source_names]
++"-1" = "main_thread"
++"-2" = "render_thread"
+diff --git a/test/unit_test/watchdog_heartbeat-test/test_case_watchdog_heartbeat.cc b/test/unit_test/watchdog_heartbeat-test/test_case_watchdog_heartbeat.cc
+new file mode 100644
+index 00000000..6ca27217
+--- /dev/null
++++ b/test/unit_test/watchdog_heartbeat-test/test_case_watchdog_heartbeat.cc
+@@ -0,0 +1,95 @@
++/*
++ * Copyright 2026 Toyota Connected North America
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++// The watchdog must stay satisfied while the app renders nothing.
++//
++// The render thread is NOT petted per frame. App::Run() runs a heartbeat on
++// the main-thread reactor (interval/2, shell/app.cc on_wd_timer) that pets
++// WATCHDOG_SOURCE_MAIN_THREAD directly and, through
++// FlutterView::PetWatchdogViaCallback() -> Engine::PetWatchdogViaCallback()
++// (shell/engine.cc), calls FlutterEnginePostCallbackOnAllNativeThreads, whose
++// callback pets WATCHDOG_SOURCE_RENDER_THREAD when it runs on the raster
++// thread. The engine queues that callback on each thread's task runner
++// (embedder.h: "posted to all threads"), so delivery depends on the thread
++// servicing tasks -- not on a frame being produced.
++//
++// That distinction is load-bearing for the hidden-launcher path: hide parks
++// vsync, so no frame is ever built, rastered or scanned out while a game
++// runs. If watchdog liveness were coupled to frame production, hiding for
++// longer than timeout_ms would abort() the process.
++//
++// The negative control -- a source nobody pets does abort -- already exists
++// as the INTEGRATION_TEST_SYSTEMD_WATCHDOG build (shell/main.cc), which
++// deliberately never pets source 100 and expects the process to die. This
++// test covers the other half: heartbeat-only pets, zero frame activity, for
++// 3x the timeout. If that does not abort, the mechanism the hidden launcher
++// relies on holds.
++//
++// The surviving part is the assertion: gtest finishing IS the check. A
++// failure here is the watchdog's abort(), i.e. a crashed test, not a failed
++// EXPECT.
++
++#include <chrono>
++#include <string>
++#include <thread>
++
++#include <gtest/gtest.h>
++
++#include "shell/watchdog/watchdog.h"
++
++namespace {
++
++constexpr char kConfigPath[] = SOURCE_ROOT_DIR "/files/watchdog_config.toml";
++
++TEST(WatchdogHeartbeat, HeartbeatPetsSurviveThreeTimeoutsWithoutFrames) {
++  const std::string config_path = kConfigPath;
++  Watchdog::init(&config_path);
++  auto& wd = Watchdog::getInstance();
++
++  const uint64_t timeout_ms = wd.getTimeoutMs();
++  ASSERT_EQ(800U, timeout_ms) << "test config not loaded";
++
++  wd.setSourceName(WATCHDOG_SOURCE_MAIN_THREAD, "main_thread");
++  wd.setSourceName(WATCHDOG_SOURCE_RENDER_THREAD, "render_thread");
++  wd.start(WATCHDOG_SOURCE_MAIN_THREAD);
++  wd.start(WATCHDOG_SOURCE_RENDER_THREAD);
++
++  // Mirror App::Run's heartbeat: both sources petted every timeout/8 -- well
++  // inside the service thread's interval/2 check period, as the real timer is
++  // -- while nothing renders. 1/8 rather than the production 1/2 so the test
++  // tolerates scheduler jitter on a loaded builder instead of racing its own
++  // timeout.
++  const auto period = std::chrono::milliseconds(timeout_ms / 8);
++  const auto deadline =
++      std::chrono::steady_clock::now() +
++      std::chrono::milliseconds(static_cast<int64_t>(timeout_ms) * 3);
++
++  while (std::chrono::steady_clock::now() < deadline) {
++    wd.pet(WATCHDOG_SOURCE_MAIN_THREAD);
++    wd.pet(WATCHDOG_SOURCE_RENDER_THREAD);
++    std::this_thread::sleep_for(period);
++  }
++
++  // Reaching here means 3x timeout elapsed with zero frame activity and no
++  // abort.
++  SUCCEED();
++
++  wd.stop(WATCHDOG_SOURCE_RENDER_THREAD);
++  wd.stop(WATCHDOG_SOURCE_MAIN_THREAD);
++  wd.shutdown();
++}
++
++}  // namespace

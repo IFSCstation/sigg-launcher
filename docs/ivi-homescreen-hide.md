@@ -159,17 +159,84 @@ Requires exposing `IsParked()` through `Backend` → `FlutterView`
 
 ## Watchdog
 
-`BUILD_WATCHDOG=ON` makes a parked render thread stop checking in and abort the
-process after `timeout_ms` (default 5000ms) — `abort()` on timeout,
-`shell/watchdog/README.md:53`. The render thread is petted at
-`shell/engine.cc:1496`; the main thread at `shell/app.cc:673,764,810`.
+**No code change needed — the suspected per-frame coupling does not exist.**
+The render thread is **not** petted per frame; it is petted from a timer on the
+main-thread reactor.
 
-While hidden, pause/stop the render source and restart it on `show`. Where the
-render thread is the one being watched, `hide` should either pet it on a
-reduced cadence or temporarily deregister it; `show` re-registers. **[UNVERIFIED]**
-— exact mechanism depends on whether the render thread continues running while
-parked (it does: parking only withholds the vsync baton, the thread itself is
-alive).
+What actually happens (all **[VERIFIED]**):
+
+- `main.cc:458` calls `App::Run()`, the asio reactor. It arms `wd_timer`
+  (`shell/app.cc:~790-816`) with `expires_after(timeout_ms / 2)` and re-arms it
+  on every fire (`arm_wd_timer()` at the end of `on_wd_timer`).
+- On each fire the handler pets `WATCHDOG_SOURCE_MAIN_THREAD` directly
+  (`shell/app.cc:810`) and calls `view->PetWatchdogViaCallback()` for every
+  view (`shell/app.cc:812`).
+- `FlutterView::PetWatchdogViaCallback()` (`shell/view/flutter_view.cc:1055`)
+  → `Engine::PetWatchdogViaCallback()` (`shell/engine.cc:1486`) →
+  `LibFlutterEngine->PostCallbackOnAllNativeThreads(...)`; the callback pets
+  `WATCHDOG_SOURCE_RENDER_THREAD` only for `kFlutterNativeThreadTypeRender`
+  (`shell/engine.cc:1496`).
+- `FlutterEnginePostCallbackOnAllNativeThreads` queues the callback on each
+  engine-managed thread's task runner (`third_party/flutter/shell/platform/embedder/embedder.h:3591-3599`,
+  "posted to all threads"). Delivery therefore requires the raster thread to
+  service its message loop — it does not require a frame to be produced.
+
+Consequences:
+
+- **While hidden, the heartbeat keeps running.** Hiding parks vsync
+  (`IVsyncProvider::SetParked`), which stops `FlutterEngineOnVsync` from being
+  posted; it does not touch `App::Run()`'s reactor, the `wd_timer`, or the
+  raster thread's task runner. Both sources keep being petted every
+  `timeout_ms / 2` with zero frames produced, so hiding for minutes cannot
+  abort the process by this mechanism.
+- **`App::Loop()` (`shell/app.cc:659`) is dead code** — no caller anywhere in
+  the tree; its own `next_pet_` timer (`shell/app.cc:676`) is not in the live
+  path. Only `App::Run()`'s heartbeat counts. **[VERIFIED by grep]**
+- **Output-disconnect parking has the same property.** `App::ApplyOnDisconnect()`
+  → `Suspend()` stops frames but the reactor keeps petting, so this path was
+  never broken either. Its behavior is unchanged by this work.
+- The remaining assumption is that the raster thread services posted tasks
+  while idle/parked. **[UNVERIFIED]** — the engine's message-loop sources are
+  not vendored (only headers under `third_party/flutter`), so this could not be
+  read from source here. It is the same condition as any static screen (no
+  animation → no frame), which the shell already lives with; confirm on target
+  with the check below.
+
+**Regression test (built, unit-tested, passing):**
+`test/unit_test/watchdog_heartbeat-test/` configures `timeout_ms = 800`,
+registers both sources, pets them only on a heartbeat cadence (1/8 of the
+timeout, zero frame activity) and holds that for 3× the timeout. Completing
+without an `abort()` is the assertion. The negative control — an unpets source
+*does* abort — already exists as `INTEGRATION_TEST_SYSTEMD_WATCHDOG`
+(`shell/main.cc:267-282`, source 100 never petted, process must die).
+
+Run it:
+
+```sh
+ctest --test-dir build -R watchdog --output-on-failure
+```
+
+**On-target manual check (not run — no labwc/Pi here).** After Step 7 wires
+Dart to the channel:
+
+```sh
+# 1. Build the shell with the watchdog on (phase 2 series applied).
+cmake -S . -B build -G Ninja \
+  -DBUILD_BACKEND_WAYLAND_EGL=ON -DBUILD_BACKEND_WAYLAND_VULKAN=OFF \
+  -DBUILD_WATCHDOG=ON -DBUILD_UNIT_TESTS=ON
+ninja -C build
+
+# 2. Run it under labwc with the sigg_launcher bundle, then hide the window
+#    (launch a game) and leave it hidden for well over 3x the timeout:
+#    default timeout_ms is 5000, so leave it 20+ seconds.
+build/shell/homescreen --bundle /path/to/sigg_launcher/bundle
+
+# 3. Pass criteria: no SIGABRT, and no "Watchdog Timeout: source" error line
+#    in the log while hidden. Then show the window again and confirm the shell
+#    is responsive.
+journalctl --user -f | grep -i watchdog   # or watch the shell's stderr
+```
+
 
 ## Lifecycle
 
@@ -252,10 +319,19 @@ covers:
    `hide`→`SetSuspended(kAppHidden, true)` / `show`→`SetSuspended(kAppHidden,
    false)` + `ScheduleFrame`.
 2. `shell/view/flutter_view.h/.cc` — two-reason suspend flags, state machine,
-   `IsParked()` query, lifecycle message sending, watchdog pause/resume.
+   `IsParked()` query, lifecycle message sending. (Watchdog pause/resume was
+   **dropped**: the render-thread pet is a main-thread timer, not per-frame —
+   see the Watchdog section.)
 3. `shell/backend/backend.h` + `wayland_egl` — `IsVsyncParked()` to detect
    whether parking actually took effect.
 4. `shell/app.cc` — migrate `ApplyOnDisconnect()` to reason-based suspend.
+
+Patch series (each step is its own reviewable file, applied in order):
+
+- `tool/ivi-homescreen/0001-sigg-window-channel.patch` — step 0, the phase 1
+  channel, fixed so it compiles.
+- `tool/ivi-homescreen/0002-watchdog-heartbeat-test.patch` — step 1, the
+  watchdog heartbeat regression test (no production-code change).
 
 Not in this patch (future work): foreign-toplevel minimize/unset_minimized for
 visual hiding; protocol XML for `zwlr_foreign_toplevel_manager_v1`.
@@ -283,7 +359,8 @@ visual hiding; protocol XML for `zwlr_foreign_toplevel_manager_v1`.
 - `wp_presentation` advertisement on the labwc target.
 - Exact `flutter/lifecycle` message format expected by the Flutter engine
   version vendored by ivi-homescreen.
-- Whether the render thread continues to be petted while parked (watchdog
-  interaction).
+- That the raster thread services posted callbacks (`PostCallbackOnAllNativeThreads`)
+  while parked — the one load-bearing assumption behind the watchdog verdict
+  above. Engine message-loop sources are not vendored; check on target.
 - That all built-in platform views honor `set_suspended`.
 - Whether a frame already in flight at `hide` time can commit after minimize.
