@@ -1,0 +1,317 @@
+diff --git a/shell/backend/backend.h b/shell/backend/backend.h
+index b2513695..d901759d 100644
+--- a/shell/backend/backend.h
++++ b/shell/backend/backend.h
+@@ -396,6 +396,17 @@ class Backend {
+    */
+   virtual void SetVsyncParked(bool /*parked*/) {}
+ 
++  /**
++   * @brief True while vsync frame production is parked for this backend.
++   *
++   * Default returns false. Backends that park vsync (Wayland EGL with a
++   * wp_presentation provider) override to report the provider's parked state.
++   * Used by the sigg_launcher/window channel to detect whether hide actually
++   * stopped frame production, so it can return an error instead of silently
++   * succeeding while frames are still rendered.
++   */
++  virtual bool IsVsyncParked() const { return false; }
++
+   /**
+    * @brief Release the backend's GPU / windowing-system resources (render
+    * surface, native window, GL contexts, display connection).
+diff --git a/shell/backend/wayland_egl/wayland_egl.h b/shell/backend/wayland_egl/wayland_egl.h
+index ce743c03..08b02311 100644
+--- a/shell/backend/wayland_egl/wayland_egl.h
++++ b/shell/backend/wayland_egl/wayland_egl.h
+@@ -209,6 +209,13 @@ class WaylandEglBackend : public Egl, public Backend {
+     }
+   }
+ 
++  bool IsVsyncParked() const override {
++    // Parking only takes effect when a wp_presentation-driven vsync provider
++    // exists. Without it, frames are still produced and hide must report an
++    // error rather than silently succeeding.
++    return vsync_ != nullptr && vsync_->IsParked();
++  }
++
+   void StopVsyncMonitor() override;
+ 
+   /**
+diff --git a/shell/platform/homescreen/flutter_desktop.cc b/shell/platform/homescreen/flutter_desktop.cc
+index 5c086212..00675401 100644
+--- a/shell/platform/homescreen/flutter_desktop.cc
++++ b/shell/platform/homescreen/flutter_desktop.cc
+@@ -41,6 +41,75 @@ struct FlutterDesktopView;
+ 
+ static_assert(FLUTTER_ENGINE_VERSION == 1, "Engine version does not match");
+ 
++#include <flutter/encodable_value.h>
++#include <flutter/method_call.h>
++#include <flutter/method_channel.h>
++#include <flutter/method_result.h>
++#include <flutter/standard_method_codec.h>
++
++namespace {
++
++// sigg_launcher/window channel: hide/show backed by FlutterView::Hide() /
++// Show() (vsync parking). The same channel name is used by the GTK runner
++// (linux/runner/my_application.cc), so WindowService.dart needs no platform
++// branch. The engine pointer is only read when Dart calls `show`, by which
++// time FlutterView::Initialize() has assigned it.
++class WindowHandlerPlugin final : public flutter::Plugin {
++ public:
++  WindowHandlerPlugin(flutter::BinaryMessenger* messenger,
++                      FlutterView* view,
++                      FlutterDesktopEngineState* state)
++      : view_(view), state_(state) {
++    channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
++        messenger, "sigg_launcher/window",
++        &flutter::StandardMethodCodec::GetInstance());
++    channel_->SetMethodCallHandler(
++        [this](const flutter::MethodCall<flutter::EncodableValue>& call,
++               std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>
++               result) { HandleMethodCall(call, std::move(result)); });
++  }
++
++ private:
++  void HandleMethodCall(
++      const flutter::MethodCall<flutter::EncodableValue>& call,
++      std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
++    if (view_ == nullptr) {
++      result->Error("no-view", "Headless engines have no window.");
++      return;
++    }
++    const std::string& method = call.method_name();
++    if (method == "hide") {
++      view_->Hide();
++      // No silent failure: if the vsync provider does not exist
++      // (wp_presentation missing or IVI_WL_VSYNC=0), parking is a no-op and
++      // frames are still produced. Report an error so Dart knows.
++      if (!view_->IsParked()) {
++        result->Error("park-failed",
++                      "vsync provider unavailable; frames still being "
++                      "produced");
++        return;
++      }
++      result->Success();
++    } else if (method == "show") {
++      view_->Show();
++      // Parking does not paint: request one frame so the surface content
++      // comes back.
++      if (state_->flutter_engine != nullptr) {
++        LibFlutterEngine->ScheduleFrame(state_->flutter_engine);
++      }
++      result->Success();
++    } else {
++      result->NotImplemented();
++    }
++  }
++
++  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> channel_;
++  FlutterView* view_;
++  FlutterDesktopEngineState* state_;
++};
++
++}  // namespace
++
+ // Populates |state|'s helper object fields that are common to normal and
+ // headless mode.
+ //
+@@ -104,6 +173,10 @@ void SetUpCommonEngineState(FlutterDesktopEngineState* state,
+   state->osgi_bridge_handler = std::make_unique<ihs::osgi::OsgiBridgePlugin>(
+       state->internal_plugin_registrar->messenger());
+ #endif
++
++  state->internal_plugin_registrar->AddPlugin(
++      std::make_unique<WindowHandlerPlugin>(
++          state->internal_plugin_registrar->messenger(), view, state));
+ }
+ 
+ FlutterDesktopEngineRef FlutterDesktopGetEngine(
+diff --git a/shell/view/flutter_view.cc b/shell/view/flutter_view.cc
+index 7a4978b4..305ba2a5 100644
+--- a/shell/view/flutter_view.cc
++++ b/shell/view/flutter_view.cc
+@@ -205,7 +205,7 @@ FlutterView::FlutterView(Configuration::Config config,
+ #if BUILD_COMPOSITOR
+           if (auto* registry = GetPlatformViewRegistry()) {
+             registry->SetSuspended(static_cast<int32_t>(id),
+-                                   suspended || m_suspended);
++                                   suspended || IsParkedByReasons());
+           }
+ #endif
+         });
+@@ -482,42 +482,61 @@ void NotifySuspended(const FlutterView* view, const bool suspended) {
+ 
+ }  // namespace
+ 
+-void FlutterView::SetSuspended(const bool suspended) {
+-  if (m_suspended == suspended) {
+-    return;  // repeated output events must not re-notify plugins
++bool FlutterView::IsParked() const {
++  if (m_backend) {
++    return m_backend->IsVsyncParked();
++  }
++  return false;
++}
++
++void FlutterView::SetSuspended(SuspendReason reason, bool suspended) {
++  const int flag = static_cast<int>(reason);
++  const int previous = suspended
++      ? m_suspend_reasons.fetch_or(flag, std::memory_order_acq_rel)
++      : m_suspend_reasons.fetch_and(~flag, std::memory_order_acq_rel);
++  const bool was_parked = previous != 0;
++  const bool is_parked = IsParkedByReasons();
++
++  if (was_parked == is_parked) {
++    return;  // no change in parked state
+   }
+-  m_suspended = suspended;
+ 
+   // Frame production first, because it cannot fail and does not depend on the
+   // engine: withholding the vsync baton means Flutter asked for a frame and
+   // gets no answer, so nothing is built, rastered or scanned out. Unparking
+   // hands back the baton that was being held.
+   if (m_backend) {
+-    m_backend->SetVsyncParked(suspended);
++    m_backend->SetVsyncParked(is_parked);
+   }
+ 
+-  // Then the plugins, which is best-effort. m_suspended is deliberately NOT
+-  // conditional on this posting: it is what SetVsyncParked was told, and
+-  // leaving it unset on a failed post would strand the view parked -- a later
+-  // Resume() would see !m_suspended, return early, and never unpark.
++  // Then the plugins, which is best-effort. is_parked is deliberately NOT
++  // conditional on this posting: it is what SetVsyncParked was told.
+   if (!PostToPlatformThread(
+-          [this, suspended] { NotifySuspended(this, suspended); })) {
++          [this, is_parked] { NotifySuspended(this, is_parked); })) {
+     // No running engine means no plugin can have registered yet, so there is
+     // nobody to tell; in practice this is shutdown. Say so rather than
+     // leaving a silent gap between the view's state and the plugins'.
+     ihs::log::warn(
+         "[FlutterView] view {}: {} with no running engine; platform views were "
+         "not notified",
+-        m_index, suspended ? "suspended" : "resumed");
++        m_index, is_parked ? "suspended" : "resumed");
+   }
+ }
+ 
+ void FlutterView::Suspend() {
+-  SetSuspended(true);
++  SetSuspended(SuspendReason::kOutputDisconnected, true);
+ }
+ 
+ void FlutterView::Resume() {
+-  SetSuspended(false);
++  SetSuspended(SuspendReason::kOutputDisconnected, false);
++}
++
++void FlutterView::Hide() {
++  SetSuspended(SuspendReason::kAppHidden, true);
++}
++
++void FlutterView::Show() {
++  SetSuspended(SuspendReason::kAppHidden, false);
+ }
+ 
+ bool FlutterView::PostToPlatformThread(std::function<void()> fn) const {
+diff --git a/shell/view/flutter_view.h b/shell/view/flutter_view.h
+index 38567c2d..c5b6ac9d 100644
+--- a/shell/view/flutter_view.h
++++ b/shell/view/flutter_view.h
+@@ -18,6 +18,7 @@
+ 
+ #include <functional>
+ #include <map>
++#include <atomic>
+ #include <memory>
+ #include <optional>
+ #include <string>
+@@ -283,6 +284,12 @@ class FlutterView {
+    * Idempotent: suspending a suspended view does nothing, so repeated output
+    * events do not re-notify plugins.
+    *
++   * Suspend/Resume are used by App::ApplyOnDisconnect() (output gone) and
++   * park/unpark with the kOutputDisconnected reason. Hide/Show are used by
++   * the sigg_launcher/window channel and park/unpark with the kAppHidden
++   * reason. The view stays parked while any reason is set, so show cannot
++   * unpark a view whose output is still gone.
++   *
+    * @relation
+    * internal
+    */
+@@ -295,10 +302,38 @@ class FlutterView {
+    */
+   void Resume();
+ 
++  /**
++   * @brief Park the view for app-initiated hide (sigg_launcher/window channel).
++   *
++   * Same mechanism as Suspend() but tracked under the kAppHidden reason so
++   * that Show() cannot unpark a view whose output was disconnected.
++   * @relation internal
++   */
++  void Hide();
++
++  /**
++   * @brief Unpark the view for app-initiated show.
++   * @relation internal
++   */
++  void Show();
++
+  private:
++  // Why the view is parked. A bitmask: the view stays parked while any bit is
++  // set, so clearing one reason cannot unpark a view the other reason still
++  // holds. Declared before SetSuspended() because a parameter type must be
++  // visible at its declaration point.
++  enum class SuspendReason : int {
++    kNone = 0,
++    // App initiated hide via the sigg_launcher/window channel.
++    kAppHidden = 1 << 0,
++    // The view's output was disconnected (App::ApplyOnDisconnect).
++    kOutputDisconnected = 1 << 1,
++  };
++
+   // The one place the parked state changes: parks/unparks frame production and
+-  // then tells the plugins. Public entry points are Suspend()/Resume().
+-  void SetSuspended(bool suspended);
++  // then tells the plugins. Public entry points are Suspend()/Resume() and
++  // Hide()/Show().
++  void SetSuspended(SuspendReason reason, bool suspended);
+ 
+   // The extent and surface scale this view reports right now, from whichever
+   // backend is active at RUNTIME -- DRM and software adopt the panel's mode,
+@@ -309,7 +344,13 @@ class FlutterView {
+   [[nodiscard]] homescreen::ViewExtent ResolveViewExtent() const;
+ 
+  public:
+-  [[nodiscard]] bool IsSuspended() const { return m_suspended; }
++  [[nodiscard]] bool IsSuspended() const { return IsParkedByReasons(); }
++
++  /// True while the backend's vsync provider is actually parked, i.e. frame
++  /// production really stopped. Used by the sigg_launcher/window channel to
++  /// detect whether hide worked; false means frames are still being produced
++  /// (no wp_presentation provider, so parking was a no-op).
++  [[nodiscard]] bool IsParked() const;
+ 
+   /// This view's platform task runner, or nullptr before Initialize(). Exposed
+   /// for the OSGi host, which pins a critical bundle's engine thread to the
+@@ -485,7 +526,15 @@ class FlutterView {
+ 
+   // Parked: the view's output went away and its platform views were told to
+   // stop producing. Not a teardown -- the engine and surface are untouched.
+-  bool m_suspended = false;
++  // Reasons the view is parked, as a bitmask of SuspendReason. The view stays
++  // parked while any bit is set: Suspend()/Resume() use kOutputDisconnected,
++  // Hide()/Show() use kAppHidden. Show() therefore cannot unpark a view
++  // whose output is still gone.
++  std::atomic<int> m_suspend_reasons{0};
++
++  // True while any suspend reason is set (view is parked).
++  [[nodiscard]] bool IsParkedByReasons() const
++  { return m_suspend_reasons.load(std::memory_order_acquire) != 0; }
+ 
+   // Platform views in and out of the scene, frame by frame; a view that
+   // leaves it is suspended on its own, parked view or not.
