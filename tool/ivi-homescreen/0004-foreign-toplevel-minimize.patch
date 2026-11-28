@@ -1,0 +1,952 @@
+diff --git a/cmake/wayland_cxx.cmake b/cmake/wayland_cxx.cmake
+index ce512852..af718927 100644
+--- a/cmake/wayland_cxx.cmake
++++ b/cmake/wayland_cxx.cmake
+@@ -290,6 +290,21 @@ function(ivi_wayland_protocols target)
+         MODE client-header EMIT_INTERFACE_TABLES
+         OUTPUT wayland-protocols/input_timestamps_client.hpp TARGET ${target})
+ 
++    # wlr-foreign-toplevel-management — every surface build. Lets the launcher
++    # visually hide itself (minimize) while a game subprocess runs, then restore
++    # + activate on exit. Vendored: it is a wlroots protocol, not part of
++    # wayland-protocols (upstream only has the read-only
++    # ext-foreign-toplevel-list). Source: swaywm/wlr-protocols unstable/,
++    # MIT/X11, Copyright © 2018 Ilia Bozhinov. No shipped wl/ helper carries its
++    # interface tables -> emit tables. Runtime-gated: the client no-ops when the
++    # compositor does not advertise the global, so generating it
++    # unconditionally costs nothing on non-wlroots stacks.
++    _ivi_wl_generate(PROTOCOL
++        "${_loc}/wlr-foreign-toplevel-management-unstable-v1.xml"
++        MODE client-header EMIT_INTERFACE_TABLES
++        OUTPUT wayland-protocols/foreign_toplevel_management_client.hpp
++        TARGET ${target})
++
+     # viewporter — every surface build (per-surface scaling; stable since wayland-protocols
+     # 1.4, so present on Dunfell's 1.20). No shipped header -> emit tables.
+     _ivi_wl_generate(PROTOCOL
+diff --git a/shell/CMakeLists.txt b/shell/CMakeLists.txt
+index 51a89389..f95021a4 100644
+--- a/shell/CMakeLists.txt
++++ b/shell/CMakeLists.txt
+@@ -89,6 +89,9 @@ if (BUILD_BACKEND_WAYLAND_EGL OR BUILD_BACKEND_WAYLAND_VULKAN)
+             vsync/wayland_vsync_provider.cc
+             # zwp_input_timestamps_v1 provider (scanner input-timestamps C++).
+             wayland/input_timestamps.cc
++            # zwlr_foreign_toplevel_manager_v1 client (visual hide: minimize/
++            # restore our toplevel around a game subprocess).
++            wayland/foreign_toplevel_client.cc
+     )
+     if (ENABLE_XDG_CLIENT OR ENABLE_AGL_SHELL_CLIENT)
+         target_sources(${PROJECT_NAME} PRIVATE wayland/shell/xdg_shell.cc)
+diff --git a/shell/view/flutter_view.cc b/shell/view/flutter_view.cc
+index fd7f4917..40cb2039 100644
+--- a/shell/view/flutter_view.cc
++++ b/shell/view/flutter_view.cc
+@@ -85,6 +85,7 @@ extern void PluginsApiRegisterPlugins(FlutterDesktopEngineRef engine);
+ 
+ #if BUILD_BACKEND_WAYLAND_EGL || BUILD_BACKEND_WAYLAND_VULKAN
+ #include "wayland/display.h"
++#include "wayland/foreign_toplevel_client.h"
+ #include "wayland/window.h"
+ #endif
+ 
+@@ -540,6 +541,16 @@ void FlutterView::Resume() {
+   SetSuspended(SuspendReason::kOutputDisconnected, false);
+ }
+ 
++#if BUILD_BACKEND_WAYLAND_EGL || BUILD_BACKEND_WAYLAND_VULKAN
++namespace {
++constexpr int kToplevelConfirmTimeoutMs = 500;
++constexpr int kToplevelPollMs = 5;
++constexpr int kToplevelConfirmAttempts =
++    kToplevelConfirmTimeoutMs / kToplevelPollMs;
++constexpr int kToplevelRetryEvery = 25;  // 125 ms
++}  // namespace
++#endif
++
+ ivi::WindowHideState::Hooks FlutterView::MakeHideHooks() {
+   ivi::WindowHideState::Hooks hooks;
+   // Park/unpark under the app-hidden reason only: an output that went away
+@@ -552,12 +563,65 @@ ivi::WindowHideState::Hooks FlutterView::MakeHideHooks() {
+   hooks.schedule = [this](const int delay_ms, std::function<void()> fn) {
+     ScheduleOnPlatformThread(delay_ms, std::move(fn));
+   };
+-  // minimize/restore stay empty until the foreign-toplevel wiring exists.
+-  // WindowHideState treats a missing hook as "nothing to do" and reports
+-  // minimized=false, so hide is honest with Dart: parked, still on screen.
++#if BUILD_BACKEND_WAYLAND_EGL || BUILD_BACKEND_WAYLAND_VULKAN
++  // Visual hide: minimize/restore through zwlr_foreign_toplevel_manager_v1.
++  // Wayland requests are posted to the reactor io_context and flushed there;
++  // never issued from the platform/raster thread. If the global is absent the
++  // hooks answer (ok, false) so the hide stays honest: parked, still visible.
++  hooks.minimize = [this](std::function<void(bool, bool)> done) {
++    AwaitToplevelState(true, kToplevelConfirmAttempts, std::move(done));
++  };
++  hooks.restore = [this](std::function<void(bool, bool)> done) {
++    AwaitToplevelState(false, kToplevelConfirmAttempts, std::move(done));
++  };
++#endif
+   return hooks;
+ }
+ 
++#if BUILD_BACKEND_WAYLAND_EGL || BUILD_BACKEND_WAYLAND_VULKAN
++void FlutterView::AwaitToplevelState(const bool want_minimized,
++                                     const int attempts_left,
++                                     std::function<void(bool, bool)> done) {
++  Display* display = GetDisplay();
++  auto* ftc = display != nullptr ? display->foreign_toplevel() : nullptr;
++  if (ftc == nullptr || !ftc->bound()) {
++    done(true, false);  // global absent: park succeeded, not minimized
++    return;
++  }
++  if (ftc->minimized() == want_minimized) {
++    done(true, want_minimized);
++    return;
++  }
++  if (attempts_left <= 0) {
++    ihs::log::warn(
++        "[ForeignToplevel] {} not confirmed by the compositor",
++        want_minimized ? "minimize" : "restore");
++    done(false, ftc->minimized());
++    return;
++  }
++  if (attempts_left % kToplevelRetryEvery == 0) {
++    if (auto* ioc = display->GetIoContext()) {
++      asio::post(*ioc, [ftc, display, want_minimized] {
++        if (want_minimized) {
++          ftc->minimize();
++        } else {
++          ftc->restore(display->GetSeat());
++        }
++        display->FlushRequests();
++      });
++    } else {
++      done(false, ftc->minimized());
++      return;
++    }
++  }
++  ScheduleOnPlatformThread(
++      kToplevelPollMs, [this, want_minimized, attempts_left,
++                        done = std::move(done)]() mutable {
++        AwaitToplevelState(want_minimized, attempts_left - 1, std::move(done));
++      });
++}
++#endif
++
+ void FlutterView::ScheduleOnPlatformThread(const int delay_ms,
+                                            std::function<void()> fn) const {
+   const auto* runner =
+diff --git a/shell/view/flutter_view.h b/shell/view/flutter_view.h
+index 615da7ab..f69a5b2d 100644
+--- a/shell/view/flutter_view.h
++++ b/shell/view/flutter_view.h
+@@ -339,6 +339,11 @@ class FlutterView {
+   // Run @p fn on the platform task thread after @p delay_ms (asio timer on
+   // that thread's io_context). Used by the drain poll.
+   void ScheduleOnPlatformThread(int delay_ms, std::function<void()> fn) const;
++#if BUILD_BACKEND_WAYLAND_EGL || BUILD_BACKEND_WAYLAND_VULKAN
++  void AwaitToplevelState(bool want_minimized,
++                          int attempts_left,
++                          std::function<void(bool, bool)> done);
++#endif
+   // Deliver a hide/show reply on the platform task thread; falls back to
+   // running it inline when there is no engine to marshal onto.
+   void ReplyOnPlatformThread(ivi::WindowHideState::Done done,
+diff --git a/shell/wayland/display.cc b/shell/wayland/display.cc
+index bcb5e199..d70a1b28 100644
+--- a/shell/wayland/display.cc
++++ b/shell/wayland/display.cc
+@@ -86,6 +86,9 @@ Display::Display(const bool enable_cursor,
+                WaylandWindow::WINDOW_NORMAL;
+       });
+   shells_ = ivi::WaylandShell::Create(shell_sel, wants_agl_extension);
++  for (auto& shell : shells_) {
++    shell->set_display(this);
++  }
+ 
+   m_display = wl_display_connect(nullptr);
+   if (m_display == nullptr) {
+@@ -188,6 +191,7 @@ Display::~Display() {
+   // Destroy the zwp_input_timestamps_v1 subscriptions + manager while the
+   // display connection is still alive.
+   input_timestamps_.Reset();
++  foreign_toplevel_.Reset();
+ 
+   // The shells (xdg/agl/ivi/simple) own their protocol objects and tear them
+   // down in their own destructors, invoked here while the connection is alive.
+@@ -358,10 +362,13 @@ void Display::HandleGlobal(wl::CRegistry& reg,
+   }
+   // wp_presentation is owned by the vsync provider;
+   // zwp_input_timestamps_manager_v1 by the input-timestamps provider (which
+-  // subscribes any devices the seat has already announced). Short-circuit ||:
+-  // each global is offered to at most one owner.
++  // subscribes any devices the seat has already announced);
++  // zwlr_foreign_toplevel_manager_v1 by the foreign-toplevel client. Short-
++  // circuit ||: each global is offered to at most one owner.
+   else if (d->m_vsync.TryBindGlobal(registry, name, interface, version) ||
+            d->input_timestamps_.TryBindGlobal(registry, name, interface,
++                                              version) ||
++           d->foreign_toplevel_.TryBindGlobal(registry, name, interface,
+                                               version)) {
+     // Claimed by whichever provider returned true; the bind happened in the
+     // condition and there is nothing left for this branch to do.
+@@ -1180,6 +1187,22 @@ size_t Display::GetOutputIndexByHandle(struct wl_output* output) const {
+   return m_all_outputs.size();
+ }
+ 
++wl_seat* Display::GetSeat() const {
++  if (m_pointer_seat != nullptr) {
++    return m_pointer_seat;
++  }
++  if (m_keyboard_seat != nullptr) {
++    return m_keyboard_seat;
++  }
++  return m_touch_seat;
++}
++
++void Display::FlushRequests() {
++  if (m_display != nullptr) {
++    wl_display_flush(m_display);
++  }
++}
++
+ void Display::NotifyOutputResized(const output_info_t* oi) {
+   const size_t idx = IndexOfOutput(oi);
+   if (idx >= m_all_outputs.size()) {
+diff --git a/shell/wayland/display.h b/shell/wayland/display.h
+index 11ac45ef..ba31ecd3 100644
+--- a/shell/wayland/display.h
++++ b/shell/wayland/display.h
+@@ -72,6 +72,7 @@
+ #include "profiling/motion_to_photon.h"
+ #include "vsync/wayland_vsync_provider.h"
+ #include "wayland/input_timestamps.h"
++#include "wayland/foreign_toplevel_client.h"
+ #include "wayland/seat_offering.h"
+ #include "wayland/shell/wayland_shell.h"
+ #include "wayland/text_input_seats.h"
+@@ -439,6 +440,13 @@ class Display : public IDisplay,
+   // Index of the output owning @p output, or OutputCount() if unknown.
+   [[nodiscard]] size_t GetOutputIndexByHandle(struct wl_output* output) const;
+ 
++  [[nodiscard]] wl_seat* GetSeat() const;
++  [[nodiscard]] asio::io_context* GetIoContext() const { return ioc_; }
++  void FlushRequests();
++  [[nodiscard]] ivi::ForeignToplevelClient* foreign_toplevel() {
++    return &foreign_toplevel_;
++  }
++
+   [[nodiscard]] size_t OutputCount() const { return m_all_outputs.size(); }
+ 
+   /**
+@@ -627,6 +635,10 @@ class Display : public IDisplay,
+   // historical behavior.
+   ivi::InputTimestamps input_timestamps_;
+ 
++  // zwlr_foreign_toplevel_manager_v1 client (visual hide around game
++  // subprocess). Runtime-optional; reset before wl_display_disconnect.
++  ivi::ForeignToplevelClient foreign_toplevel_;
++
+   /**
+    * @brief Hide the pointer. Needs m_pointer.wl_pointer.
+    */
+diff --git a/shell/wayland/foreign_toplevel_client.cc b/shell/wayland/foreign_toplevel_client.cc
+new file mode 100644
+index 00000000..5353a351
+--- /dev/null
++++ b/shell/wayland/foreign_toplevel_client.cc
+@@ -0,0 +1,209 @@
++/*
++ * Copyright 2026 Toyota Connected North America
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "wayland/foreign_toplevel_client.h"
++
++#include <algorithm>
++
++#include <wayland-client.h>
++
++#include <wl/proxy_impl.hpp>
++
++#include "logging/logging.h"
++
++namespace ivi {
++
++namespace ftc = wlr_foreign_toplevel_management_unstable_v1::client;
++
++ForeignToplevelClient::~ForeignToplevelClient() {
++  Reset();
++}
++
++bool ForeignToplevelClient::TryBindGlobal(wl_registry* registry,
++                                          const uint32_t name,
++                                          const std::string_view interface,
++                                          const uint32_t version) {
++  if (interface !=
++      ftc::zwlr_foreign_toplevel_manager_v1_traits::interface_name) {
++    return false;
++  }
++  if (manager_.Get() != nullptr) {
++    return true;
++  }
++  const uint32_t bind_ver = std::min(
++      version, ftc::zwlr_foreign_toplevel_manager_v1_traits::version);
++  auto* raw = static_cast<wl_proxy*>(wl_registry_bind(
++      registry, name,
++      &ftc::zwlr_foreign_toplevel_manager_v1_traits::wl_iface(), bind_ver));
++  if (raw == nullptr) {
++    ihs::log::warn("[ForeignToplevel] manager bind failed");
++    return true;
++  }
++  manager_.Get()->owner = this;
++  manager_.Get()->_SetProxy(raw);
++  ihs::log::debug(
++      "[ForeignToplevel] bound zwlr_foreign_toplevel_manager_v1 v{}",
++      bind_ver);
++  return true;
++}
++
++void ForeignToplevelClient::set_app_id(const std::string_view app_id) {
++  const std::lock_guard<std::mutex> lock(mu_);
++  app_id_ = app_id;
++}
++
++bool ForeignToplevelClient::is_ours(const std::string_view app_id) const {
++  const std::lock_guard<std::mutex> lock(mu_);
++  return !app_id_.empty() && app_id == app_id_;
++}
++
++void ForeignToplevelClient::OnToplevel(wl_proxy* toplevel) {
++  SweepClosed();
++  if (toplevel == nullptr) {
++    return;
++  }
++  auto handle = std::make_unique<Handle>();
++  handle->owner = this;
++  auto& slot = handles_[toplevel];
++  slot = std::move(handle);
++  slot->_SetProxy(toplevel);
++  ihs::log::debug("[ForeignToplevel] toplevel handle {} created",
++                  reinterpret_cast<const void*>(toplevel));
++}
++
++void ForeignToplevelClient::OnFinished() {
++  ihs::log::debug("[ForeignToplevel] manager finished");
++  Reset();
++}
++
++void ForeignToplevelClient::SweepClosed() {
++  if (closed_.empty()) {
++    return;
++  }
++  for (wl_proxy* proxy : closed_) {
++    auto it = handles_.find(proxy);
++    if (it == handles_.end()) {
++      continue;
++    }
++    const bool was_ours = is_ours(it->second->app_id);
++    wl_proxy_destroy(proxy);
++    handles_.erase(it);
++    if (was_ours) {
++      const std::lock_guard<std::mutex> lock(mu_);
++      minimized_ = false;
++    }
++  }
++  closed_.clear();
++}
++
++ForeignToplevelClient::Handle* ForeignToplevelClient::our_handle() {
++  SweepClosed();
++
++  std::string wanted;
++  {
++    const std::lock_guard<std::mutex> lock(mu_);
++    wanted = app_id_;
++  }
++  if (wanted.empty()) {
++    return nullptr;
++  }
++
++  Handle* match = nullptr;
++  int matches = 0;
++  for (auto& [proxy, handle] : handles_) {
++    if (handle->app_id == wanted) {
++      ++matches;
++      match = handle.get();
++    }
++  }
++  if (matches == 0) {
++    return nullptr;
++  }
++  if (matches > 1) {
++    ihs::log::error(
++        "[ForeignToplevel] {} toplevels match app_id='{}'; refusing to pick one",
++        matches, wanted);
++    for (auto& [proxy, handle] : handles_) {
++      if (handle->app_id == wanted) {
++        ihs::log::debug(
++            "[ForeignToplevel] candidate handle {} app_id='{}' minimized={}",
++            reinterpret_cast<const void*>(handle.get()), handle->app_id,
++            handle->minimized);
++      }
++    }
++    return nullptr;
++  }
++  return match;
++}
++
++void ForeignToplevelClient::minimize() {
++  if (auto* handle = our_handle()) {
++    ihs::log::debug("[ForeignToplevel] minimize app_id='{}'", handle->app_id);
++    handle->SetMinimized();
++  } else {
++    ihs::log::warn("[ForeignToplevel] minimize: no unambiguous toplevel");
++  }
++}
++
++void ForeignToplevelClient::restore(wl_seat* seat) {
++  if (auto* handle = our_handle()) {
++    ihs::log::debug("[ForeignToplevel] restore app_id='{}'", handle->app_id);
++    handle->UnsetMinimized();
++    if (seat != nullptr) {
++      handle->Activate(reinterpret_cast<wl_proxy*>(seat));
++    }
++  } else {
++    ihs::log::warn("[ForeignToplevel] restore: no unambiguous toplevel");
++  }
++}
++
++bool ForeignToplevelClient::minimized() const {
++  const std::lock_guard<std::mutex> lock(mu_);
++  return minimized_;
++}
++
++void ForeignToplevelClient::Reset() {
++  for (auto& [proxy, handle] : handles_) {
++    (void)handle;
++    // Compositor owns handle lifetime, but client proxy must be destroyed.
++    wl_proxy_destroy(proxy);
++  }
++  handles_.clear();
++  for (wl_proxy* proxy : closed_) {
++    wl_proxy_destroy(proxy);
++  }
++  closed_.clear();
++  if (manager_.Get() != nullptr) {
++    manager_.Get()->Stop();
++    manager_.Reset();
++  }
++  const std::lock_guard<std::mutex> lock(mu_);
++  minimized_ = false;
++}
++
++void ForeignToplevelClient::Manager::OnToplevel(wl_proxy* toplevel) {
++  if (owner != nullptr) {
++    owner->OnToplevel(toplevel);
++  }
++}
++
++void ForeignToplevelClient::Manager::OnFinished() {
++  if (owner != nullptr) {
++    owner->OnFinished();
++  }
++}
++
++}  // namespace ivi
+diff --git a/shell/wayland/foreign_toplevel_client.h b/shell/wayland/foreign_toplevel_client.h
+new file mode 100644
+index 00000000..28c2687a
+--- /dev/null
++++ b/shell/wayland/foreign_toplevel_client.h
+@@ -0,0 +1,154 @@
++/*
++ * Copyright 2026 Toyota Connected North America
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef SHELL_WAYLAND_FOREIGN_TOPLEVEL_CLIENT_H_
++#define SHELL_WAYLAND_FOREIGN_TOPLEVEL_CLIENT_H_
++
++#include <cstdint>
++#include <map>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include <wayland-client.h>
++
++#include <wl/wl_ptr.hpp>
++
++#include "foreign_toplevel_management_client.hpp"  // generated
++
++struct wl_registry;
++struct wl_seat;
++
++namespace ivi {
++
++namespace ftc = wlr_foreign_toplevel_management_unstable_v1::client;
++
++/**
++ * @brief Client side of `zwlr_foreign_toplevel_manager_v1`.
++ *
++ * Used only for the minimize/restore subset: visually hide the launcher's own
++ * toplevel while a game subprocess runs, then unminimize + activate it on exit.
++ * A null-buffer unmap is the wrong primitive (wlroots disconnects a client that
++ * commits null without a reconfigure/ack cycle; xdg_toplevel state is lost).
++ *
++ * Threading: TryBindGlobal and all protocol events run on the Wayland reactor
++ * thread. minimize()/restore() are posted there by callers. set_app_id() may
++ * come from the platform thread; minimized() is read from the platform thread;
++ * those two take the mutex. Wayland requests never run on the raster/platform
++ * thread directly.
++ *
++ * Runtime-optional: when the compositor does not advertise the global,
++ * bound() is false and callers report minimized=false (parked, still visible).
++ */
++class ForeignToplevelClient {
++ public:
++  ForeignToplevelClient() = default;
++  ~ForeignToplevelClient();
++
++  ForeignToplevelClient(const ForeignToplevelClient&) = delete;
++  ForeignToplevelClient& operator=(const ForeignToplevelClient&) = delete;
++
++  [[nodiscard]] bool TryBindGlobal(wl_registry* registry,
++                                   uint32_t name,
++                                   std::string_view interface,
++                                   uint32_t version);
++
++  void set_app_id(std::string_view app_id);
++
++  [[nodiscard]] bool bound() const { return manager_.Get() != nullptr; }
++
++  /// Minimize our toplevel. No-op with warning when no unambiguous handle.
++  /// Must run on the Wayland thread.
++  void minimize();
++
++  /// Unminimize + activate our toplevel (activate skipped when seat is null).
++  /// Must run on the Wayland thread.
++  void restore(wl_seat* seat);
++
++  /// Last compositor-reported minimized state for OUR toplevel. Any thread.
++  [[nodiscard]] bool minimized() const;
++
++  /// Destroy manager + handles. Must run before wl_display_disconnect.
++  void Reset();
++
++ private:
++  // Concrete manager CRTP (CZwlrForeignToplevelManagerV1 is a template).
++  class Manager final
++      : public ftc::CZwlrForeignToplevelManagerV1<Manager> {
++   public:
++    void OnToplevel(wl_proxy* toplevel) override;
++    void OnFinished() override;
++    ForeignToplevelClient* owner = nullptr;
++  };
++
++  void OnToplevel(wl_proxy* toplevel);
++  void OnFinished();
++  void SweepClosed();
++  [[nodiscard]] bool is_ours(std::string_view app_id) const;
++
++  // Handle must be complete here: std::map<unique_ptr<Handle>> needs sizeof.
++  struct Handle final : public ftc::CZwlrForeignToplevelHandleV1<Handle> {
++    ForeignToplevelClient* owner = nullptr;
++    std::string app_id;
++    bool minimized = false;
++    bool closed = false;
++
++    void OnAppId(const char* id) override { app_id = id != nullptr ? id : ""; }
++
++    void OnState(wl_array* state) override {
++      bool is_minimized = false;
++      if (state != nullptr && state->size >= sizeof(uint32_t)) {
++        const auto* data = static_cast<const uint32_t*>(state->data);
++        const size_t n = state->size / sizeof(uint32_t);
++        for (size_t i = 0; i < n; ++i) {
++          if (data[i] == static_cast<uint32_t>(
++                             ftc::ZwlrForeignToplevelHandleV1State::Minimized)) {
++            is_minimized = true;
++            break;
++          }
++        }
++      }
++      minimized = is_minimized;
++      if (owner != nullptr && owner->is_ours(app_id)) {
++        const std::lock_guard<std::mutex> lock(owner->mu_);
++        owner->minimized_ = is_minimized;
++      }
++    }
++
++    void OnClosed() override {
++      closed = true;
++      if (owner != nullptr && GetProxy() != nullptr) {
++        owner->closed_.push_back(GetProxy());
++      }
++    }
++  };
++
++  [[nodiscard]] Handle* our_handle();
++
++  wl::WlPtr<Manager> manager_;
++  std::map<wl_proxy*, std::unique_ptr<Handle>> handles_;  // Wayland thread
++  std::vector<wl_proxy*> closed_;                         // Wayland thread
++
++  mutable std::mutex mu_;
++  std::string app_id_;
++  bool minimized_ = false;
++};
++
++}  // namespace ivi
++
++#endif  // SHELL_WAYLAND_FOREIGN_TOPLEVEL_CLIENT_H_
+diff --git a/shell/wayland/protocols/wlr-foreign-toplevel-management-unstable-v1.xml b/shell/wayland/protocols/wlr-foreign-toplevel-management-unstable-v1.xml
+new file mode 100644
+index 00000000..6a26dad2
+--- /dev/null
++++ b/shell/wayland/protocols/wlr-foreign-toplevel-management-unstable-v1.xml
+@@ -0,0 +1,267 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<protocol name="wlr_foreign_toplevel_management_unstable_v1">
++  <copyright>
++    Copyright © 2018 Ilia Bozhinov
++
++    Permission to use, copy, modify, distribute, and sell this
++    software and its documentation for any purpose is hereby granted
++    without fee, provided that the above copyright notice appear in
++    all copies and that both that copyright notice and this permission
++    notice appear in supporting documentation, and that the name of
++    the copyright holders not be used in advertising or publicity
++    pertaining to distribution of the software without specific,
++    written prior permission.  The copyright holders make no
++    representations about the suitability of this software for any
++    purpose.  It is provided "as is" without express or implied
++    warranty.
++
++    THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS
++    SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
++    FITNESS, IN NO EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY
++    SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++    WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN
++    AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
++    ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
++    THIS SOFTWARE.
++  </copyright>
++
++  <interface name="zwlr_foreign_toplevel_manager_v1" version="3">
++    <description summary="list and control opened apps">
++      The purpose of this protocol is to enable the creation of taskbars
++      and docks by providing them with a list of opened applications and
++      letting them request certain actions on them, like maximizing, etc.
++
++      After a client binds the zwlr_foreign_toplevel_manager_v1, each opened
++      toplevel window will be sent via the toplevel event
++    </description>
++
++    <event name="toplevel">
++      <description summary="a toplevel has been created">
++        This event is emitted whenever a new toplevel window is created. It
++        is emitted for all toplevels, regardless of the app that has created
++        them.
++
++        All initial details of the toplevel(title, app_id, states, etc.) will
++        be sent immediately after this event via the corresponding events in
++        zwlr_foreign_toplevel_handle_v1.
++      </description>
++      <arg name="toplevel" type="new_id" interface="zwlr_foreign_toplevel_handle_v1"/>
++    </event>
++
++    <request name="stop">
++      <description summary="stop sending events">
++        Indicates the client no longer wishes to receive events for new toplevels.
++        However the compositor may emit further toplevel_created events, until
++        the finished event is emitted.
++
++        The client must not send any more requests after this one.
++      </description>
++    </request>
++
++    <event name="finished" type="destructor">
++      <description summary="the compositor has finished with the toplevel manager">
++        This event indicates that the compositor is done sending events to the
++        zwlr_foreign_toplevel_manager_v1. The server will destroy the object
++        immediately after sending this request, so it will become invalid and
++        the client should free any resources associated with it.
++      </description>
++    </event>
++  </interface>
++
++  <interface name="zwlr_foreign_toplevel_handle_v1" version="3">
++    <description summary="an opened toplevel">
++      A zwlr_foreign_toplevel_handle_v1 object represents an opened toplevel
++      window. Each app may have multiple opened toplevels.
++
++      Each toplevel has a list of outputs it is visible on, conveyed to the
++      client via the output_enter and output_leave events.
++    </description>
++
++    <event name="title">
++      <description summary="title change">
++        This event is emitted whenever the title of the toplevel changes.
++      </description>
++      <arg name="title" type="string"/>
++    </event>
++
++    <event name="app_id">
++      <description summary="app-id change">
++        This event is emitted whenever the app-id of the toplevel changes.
++      </description>
++      <arg name="app_id" type="string"/>
++    </event>
++
++    <event name="output_enter">
++      <description summary="toplevel entered an output">
++        This event is emitted whenever the toplevel becomes visible on
++        the given output. A toplevel may be visible on multiple outputs.
++      </description>
++      <arg name="output" type="object" interface="wl_output"/>
++    </event>
++
++    <event name="output_leave">
++      <description summary="toplevel left an output">
++        This event is emitted whenever the toplevel stops being visible on
++        the given output. It is guaranteed that an entered-output event
++        with the same output has been emitted before this event.
++      </description>
++      <arg name="output" type="object" interface="wl_output"/>
++    </event>
++
++    <request name="set_maximized">
++      <description summary="requests that the toplevel be maximized">
++        Requests that the toplevel be maximized. If the maximized state actually
++        changes, this will be indicated by the state event.
++      </description>
++    </request>
++
++    <request name="unset_maximized">
++      <description summary="requests that the toplevel be unmaximized">
++        Requests that the toplevel be unmaximized. If the maximized state actually
++        changes, this will be indicated by the state event.
++      </description>
++    </request>
++
++    <request name="set_minimized">
++      <description summary="requests that the toplevel be minimized">
++        Requests that the toplevel be minimized. If the minimized state actually
++        changes, this will be indicated by the state event.
++      </description>
++    </request>
++
++    <request name="unset_minimized">
++      <description summary="requests that the toplevel be unminimized">
++        Requests that the toplevel be unminimized. If the minimized state actually
++        changes, this will be indicated by the state event.
++      </description>
++    </request>
++
++    <request name="activate">
++      <description summary="activate the toplevel">
++        Request that this toplevel be activated on the given seat.
++        There is no guarantee the toplevel will be actually activated.
++      </description>
++      <arg name="seat" type="object" interface="wl_seat"/>
++    </request>
++
++    <enum name="state">
++      <description summary="types of states on the toplevel">
++        The different states that a toplevel can have. These have the same meaning
++        as the states with the same names defined in xdg-toplevel
++      </description>
++      <entry name="maximized"  value="0" summary="the toplevel is maximized"/>
++      <entry name="minimized"  value="1" summary="the toplevel is minimized"/>
++      <entry name="activated"  value="2" summary="the toplevel is active"/>
++      <entry name="fullscreen" value="3" summary="the toplevel is fullscreen" since="2"/>
++    </enum>
++
++    <event name="state">
++      <description summary="the toplevel state changed">
++        This event is emitted immediately after the zlw_foreign_toplevel_handle_v1
++        is created and each time the toplevel state changes, either because of a
++        compositor action or because of a request in this protocol.
++      </description>
++      <arg name="state" type="array"/>
++    </event>
++
++    <event name="done">
++      <description summary="all information about the toplevel has been sent">
++        This event is sent after all changes in the toplevel state have been
++        sent.
++
++        This allows changes to the zwlr_foreign_toplevel_handle_v1 properties
++        to be seen as atomic, even if they happen via multiple events.
++      </description>
++    </event>
++
++    <request name="close">
++      <description summary="request that the toplevel be closed">
++        Send a request to the toplevel to close itself. The compositor would
++        typically use a shell-specific method to carry out this request, for
++        example by sending the xdg_toplevel.close event. However, this gives
++        no guarantees the toplevel will actually be destroyed. If and when
++        this happens, the zwlr_foreign_toplevel_handle_v1.closed event will
++        be emitted.
++      </description>
++    </request>
++
++    <request name="set_rectangle">
++      <description summary="the rectangle which represents the toplevel">
++        The rectangle of the surface specified in this request corresponds to
++        the place where the app using this protocol represents the given toplevel.
++        It can be used by the compositor as a hint for some operations, e.g
++        minimizing. The client is however not required to set this, in which
++        case the compositor is free to decide some default value.
++
++        If the client specifies more than one rectangle, only the last one is
++        considered.
++
++        The dimensions are given in surface-local coordinates.
++        Setting width=height=0 removes the already-set rectangle.
++      </description>
++      <arg name="surface" type="object" interface="wl_surface"/>
++      <arg name="x" type="int"/>
++      <arg name="y" type="int"/>
++      <arg name="width" type="int"/>
++      <arg name="height" type="int"/>
++    </request>
++
++    <enum name="error">
++      <entry name="invalid_rectangle" value="0"
++        summary="the provided rectangle is invalid"/>
++    </enum>
++
++    <event name="closed">
++      <description summary="this toplevel has been destroyed">
++        This event means the toplevel has been destroyed. It is guaranteed there
++        won't be any more events for this zwlr_foreign_toplevel_handle_v1. The
++        toplevel itself becomes inert so any requests will be ignored except the
++        destroy request.
++      </description>
++    </event>
++
++    <request name="destroy" type="destructor">
++      <description summary="destroy the zwlr_foreign_toplevel_handle_v1 object">
++        Destroys the zwlr_foreign_toplevel_handle_v1 object.
++
++        This request should be called either when the client does not want to
++        use the toplevel anymore or after the closed event to finalize the
++        destruction of the object.
++      </description>
++    </request>
++
++    <!-- Version 2 additions -->
++
++    <request name="set_fullscreen" since="2">
++      <description summary="request that the toplevel be fullscreened">
++        Requests that the toplevel be fullscreened on the given output. If the
++        fullscreen state and/or the outputs the toplevel is visible on actually
++        change, this will be indicated by the state and output_enter/leave
++        events.
++
++        The output argument is a hint to the compositor. Implementations may
++        choose to ignore it. If a null output argument is passed, the compositor
++        will decide which output to fullscreen the toplevel on.
++      </description>
++      <arg name="output" type="object" interface="wl_output" allow-null="true"/>
++    </request>
++
++    <request name="unset_fullscreen" since="2">
++      <description summary="request that the toplevel be unfullscreened">
++        Requests that the toplevel be unfullscreened. If the fullscreen state
++        actually changes, this will be indicated by the state event.
++      </description>
++    </request>
++
++    <!-- Version 3 additions -->
++
++    <event name="parent" since="3">
++      <description summary="parent change">
++        This event is emitted whenever the parent of the toplevel changes.
++
++        No event is emitted when the parent handle is destroyed by the client.
++      </description>
++      <arg name="parent" type="object" interface="zwlr_foreign_toplevel_handle_v1" allow-null="true"/>
++    </event>
++  </interface>
++</protocol>
+diff --git a/shell/wayland/shell/wayland_shell.h b/shell/wayland/shell/wayland_shell.h
+index 26adf70f..cf24af8a 100644
+--- a/shell/wayland/shell/wayland_shell.h
++++ b/shell/wayland/shell/wayland_shell.h
+@@ -29,6 +29,8 @@ struct wl_surface;
+ struct wl_output;
+ struct wl_display;
+ 
++class Display;  // global namespace; pointer-only to avoid include cycle
++
+ namespace ivi {
+ 
+ /**
+@@ -194,6 +196,13 @@ class WaylandShell {
+ 
+  protected:
+   WaylandShell() = default;
++
++  // Set by Display before CreateSurface; used by xdg to register app_id.
++  Display* display_ = nullptr;
++
++ public:
++  void set_display(Display* display) { display_ = display; }
++  [[nodiscard]] Display* display() const { return display_; }
+ };
+ 
+ /**
+diff --git a/shell/wayland/shell/xdg_shell.cc b/shell/wayland/shell/xdg_shell.cc
+index d2445a09..d3bfeefe 100644
+--- a/shell/wayland/shell/xdg_shell.cc
++++ b/shell/wayland/shell/xdg_shell.cc
+@@ -24,6 +24,8 @@
+ #include <wl/proxy_impl.hpp>      // wl::construct
+ 
+ #include "logging/logging.h"
++#include "wayland/display.h"
++#include "wayland/foreign_toplevel_client.h"
+ 
+ namespace ivi {
+ 
+@@ -195,6 +197,11 @@ std::unique_ptr<ShellSurface> XdgShell::CreateSurface(
+     ihs::log::error("[XdgShell] CreateSurface called before xdg_wm_base bound");
+     return nullptr;
+   }
++  if (display_ != nullptr) {
++    if (auto* ftc = display_->foreign_toplevel(); ftc != nullptr) {
++      ftc->set_app_id(config.app_id);
++    }
++  }
+   return std::make_unique<XdgShellSurface>(*xdg_wm_base_.Get(), surface,
+                                            config);
+ }
